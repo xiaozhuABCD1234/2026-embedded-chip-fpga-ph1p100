@@ -1,0 +1,12 @@
+[submodule "fpga"]
+	path = fpga
+	url = git@github.com:xiaozhuABCD1234/ph1p100-pcie-ep-fpga.git
+	branch = main
+[submodule "driver"]
+	path = driver
+	url = git@github.com:xiaozhuABCD1234/ph1p100-pcie-ep-driver.git
+	branch = main
+[submodule "display"]
+	path = display
+	url = git@github.com:xiaozhuABCD1234/ph1p100-pcie-ep-display.git
+	branch = main
