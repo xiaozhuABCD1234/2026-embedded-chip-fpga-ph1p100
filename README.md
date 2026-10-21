@@ -28,7 +28,7 @@ IMX415 ×2 ──MIPI CSI-2（4 lane × 1.5Gbps）──▶ FPGA
 | 项 | 数值 |
 |---|---|
 | 帧率（FPGA→主机，每路） | **7.85 fps**（A 测 7.90、B 测 7.80） |
-| MJPEG 推流（每路） | 3.0 / 3.2 fps（受 RK3588 单核 JPEG 编码限制） |
+| MJPEG 推流（每路） | 3.0 / 3.2 fps（受 RK3588 单核 JPEG 编码限制）；`display-stream --scale 2` 输出 1080p 可到 **约 14 fps** |
 | 每帧 | 3840×2160 灰度 = 8294400 B；每路 64800 笔 MWr |
 | 帧错误 | 两路 `err=0`，门铃/时长均正常 |
 | PCIe | Gen2 ×2（理论 1 GB/s），实际两路合计 **130 MB/s ≈ 13%** |
@@ -49,7 +49,8 @@ IMX415 本身：**12-bit 输出最高 60.3 fps，10-bit 输出最高 90.9 fps**�
 
 - 每路 497 MB/s；两路写 + 推帧读 DDR3 ≈ **2 GB/s**（用户口 3.2 GB/s 的 62%，仍有余量）
 - PCIe 两路合计 ≈ **1 GB/s** ⇒ 会顶满 Gen2 ×2（需升 x4 或 Gen3）
-- 主机侧 4K JPEG 编码要另想办法（现在单核 4K 只有 3 fps，建议先降采样或多线程）
+- 主机侧 4K JPEG 编码：单核 4K 只有 3 fps；用 `display-stream --scale 2`（CFA binning，输出 1080p）
+  已能到约 14 fps，够覆盖传感器 7.85 fps
 
 ## 快速开始（板子侧）
 
@@ -74,7 +75,7 @@ sudo /home/orangepi/live_dual.sh
   「一致性不通过」（重取一次即可）；要根治需推帧引擎支持目标地址轮换 + 多槽。
 - **FPGA 热重配会把 PCIe 链路降到 Gen1 ×1**，此后 MWr 会被 RC 静默丢 ⇒ 必须重启 RK3588。
 - 只取 RAW10 的高 8 位（1 字节 1 像素）；要 16bit 通路得带宽翻倍。
-- `display-stream` 单线程编码，4K 只有几 fps。
+- `display-stream` 单线程编码，4K 彩色只有 3 fps；`--scale 2`（CFA binning → 1080p）约 14 fps。
 
 ## 硬件与工具链
 
