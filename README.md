@@ -1,85 +1,98 @@
-# PH1P100 PCIe EP —— 双路 4K 相机采集（总仓库）
+# PH1P100 PCIe EP —— 相机采集（总仓库）
 
-两颗 IMX415 各出 4K → FPGA 整帧直通 DDR3 双缓冲 → EP 主动用 MWr 写进 RK3588 内存 →
-主机两路各自取帧 / 推 MJPEG 流。**两路独立、同时**。
+安路 PH1P100 做 PCIe 端点，把 MIPI 相机整帧用 MWr 写进 RK3588 内存；主机侧驱动收帧、
+用户态取帧 / 推流。
+
+当前三个子仓库都已对齐到各自 `origin/main`（2026-10-27 合并），主线架构是
+**T07/RKA1 单引擎 one-shot**：一帧一个 ARM 额度、推完进 held、主机核对后 ACK 才放行下一帧，
+帧格式是 1080p RAW10 的 R10F 非压缩容器。
 
 ## 子仓库（submodule）
 
 | 目录 | 仓库 | 职责 |
 |---|---|---|
-| `fpga/` | `ph1p100-pcie-ep-fpga` | 安路 PH1P100 的 EP 逻辑：MIPI CSI-2 收 4K、直通 DDR3 双缓冲、两路推帧引擎、BAR0 寄存器面 |
-| `driver/` | `ph1p100-pcie-ep-driver` | RK3588 侧 Linux 驱动：两路一致性缓冲、两个字符节点、链路/推帧 ioctl 与用户态工具（Rust） |
+| `fpga/` | `ph1p100-pcie-ep-fpga` | PH1P100 的 EP 逻辑：MIPI CSI-2 收 4K、R10F 写者落 DDR3、one-shot 推帧引擎、BAR0 寄存器面（含 RKA1 安全扩展） |
+| `driver/` | `ph1p100-pcie-ep-driver` | RK3588 侧 Linux 驱动：一致性收帧缓冲、字符节点、链路/推帧/RKA1 ioctl 与 Rust 工具 |
 | `display/` | `ph1p100-pcie-ep-display` | 用户态显示：MJPEG / 快照 HTTP 服务、Bayer 去马赛克与后处理 |
 
-各子仓库的 README 有本组件的细节；本文件只讲整体与实测性能。
-
-## 数据通路
+## 数据通路（当前）
 
 ```
-IMX415 ×2 ──MIPI CSI-2（4 lane × 1.5Gbps）──▶ FPGA
-   裁剪/组字（RAW10>>2，4px/字）→ DDR3 双缓冲（A 1/9MB、B 17/25MB，写口按突发仲裁）
-   → 两路推帧引擎（AXI 读口按突发仲裁、TL 发送口按 TLP 仲裁）
-   ──PCIe Gen2 ×2，MWr──▶ RK3588 一致性内存（每路 8.29MB 槽 + mailbox）
-   → /dev/…_frame（A）、/dev/…_frame_b（B）→ frame_grab / display-stream
+IMX415 ×2 ──MIPI CSI-2（4 lane）──▶ checked CSI 包层（CRC/ECC 校验）
+   → 偶数 ROI 裁剪 1920×1080（roi 960,540）→ packed RAW10（2400 B/行）
+   → R10F 容器（128B 头 + 2592000B 载荷 + 4KiB 对齐尾零 = 2592768 B）
+   → DDR3 双缓冲（A/B 各一对，写口按突发仲裁）
+   → one-shot 推帧引擎（20256 笔 128B MWr + 一笔 4B 门铃）
+   ──PCIe Gen2 ×2──▶ RK3588 一致性内存（槽 + mailbox 页）
+   → /dev/ANLOGIC-PCI0_frame → 取帧 / 推流
 ```
 
-## 当前性能（2026-10-17 板上实测）
+`CTRL[8]` 选推帧取哪一路（0 = A、1 = B），ARM 那一拍锁存，所以**改选择必须在 ARM 之前**。
+
+## 2026-10-27 板上实测（本仓当前代码）
+
+| 项 | 结果 |
+|---|---|
+| 位流 | `ph1p_pcie_ep_top.bit` 5224023 B，SHA256 `af8a7499…1fb16df2`；SWNS +0.108 ns、HWNS +0.020 ns、0 条违例 |
+| 链路 | `PCIe Gen.2 x2 link up`，`[1edb:abcd]`，BAR0 1 MB |
+| RKA1 扩展 | `0x118 = 0x31414B52`（"RKA1"）、`0x11C = 0x00010000`（v1.0） |
+| one-shot 推帧 | ARM → 20256 笔 MWr → `0xC0 pushed=1` → mailbox `seq=1` → ACK 释放 |
+| 帧校验 | 2592768 B，`r10f_strict.py check` → **R10F_STRICT_OK**（几何/三层长度/三段 CRC/尾零全过） |
+| 帧 SHA256 | `a7063149c4bbb953ce7fdeacfb280fa677097f03c69862cfae9b1e07437e4edb` |
+
+细节与复跑命令见 [fpga/docs/BOARD_TEST_20261027.md](fpga/docs/BOARD_TEST_20261027.md)。
+
+## 已知问题（当前）
+
+- **A 路 R10F 写者从不发布**：`0xA0 DDR_FRAME_SEQ` 恒 0、`0xA8` 每帧记错（err_cnt 逐帧 +1，
+  valid=0/busy=1/err=1），写者诊断只数到 1144 行（B 路 2192 行）。上表那一帧走的是 B 路
+  （`CTRL[8]=1`）。待修：A 路的行/组裁剪计数与真实 2192 行 × 4830 B/行 对齐。
+- one-shot 语义意味着**每帧要一次 ARM + 一次 ACK**；驱动 probe 里会自动 ARM 一次，
+  用户态 ACK 时 `ack_session` 传 0 表示用驱动自己那份会话号。
+- 位流是 SRAM 配置：**掉电/重烧后必须重启 RK3588** 才会重新枚举出 Gen2 ×2。
+- 每路只有一个槽且推帧目标不轮换：连续推时取帧可能撞上覆盖，重取一次即可。
+
+## 历史：双路 4K 直通（2026-10-17 实测，已不在主线）
+
+本地历史里的 `537a14c4` 一线跑的是另一套：两路 3840×2160 灰度各自推帧、两个节点
+`/dev/ANLOGIC-PCI0_frame` 与 `…_frame_b` 同时可用，当时实测：
 
 | 项 | 数值 |
 |---|---|
-| 帧率（FPGA→主机，每路） | **7.85 fps**（A 测 7.90、B 测 7.80） |
-| MJPEG 推流（每路） | 3.0 / 3.2 fps（受 RK3588 单核 JPEG 编码限制）；`display-stream --scale 2` 输出 1080p 可到 **约 14 fps** |
-| 每帧 | 3840×2160 灰度 = 8294400 B；每路 64800 笔 MWr |
-| 帧错误 | 两路 `err=0`，门铃/时长均正常 |
-| PCIe | Gen2 ×2（理论 1 GB/s），实际两路合计 **130 MB/s ≈ 13%** |
-| DDR3 | 用户口 3.2 GB/s，实际 **260 MB/s**（写 130 + 推帧读 130）≈ 8% |
-| MIPI | 每路峰值 750 MB/s，实际像素载荷 65 MB/s ≈ 9% |
-| 主机内存 | 驱动缓冲 16.6 MB（2 路 × 8.3MB）；两推流进程 RSS 89MB+62MB |
-| CPU | 两个 display-stream 各占满 1 核（RK3588 共 8 核 ⇒ ≈25%），load ≈2 |
-| FPGA 资源 | ERAM 141/300（47%）、LUT 18.3%、寄存器 10.7%、slice 20.1%；**时序 0 违规** |
+| 帧率（FPGA→主机，每路） | 7.85 fps（A 7.90 / B 7.80） |
+| 每帧 | 3840×2160 灰度 = 8294400 B，64800 笔 MWr |
+| PCIe | Gen2 ×2，两路合计 130 MB/s ≈ 13% |
+| DDR3 | 用户口 3.2 GB/s，实际 260 MB/s ≈ 8% |
+| MJPEG 推流 | 每路 3.0 / 3.2 fps；`display-stream --scale 2`（1080p）约 14 fps |
 
-结论：**链路与 DDR 都还剩 85% 以上余量，当前瓶颈是主机侧的 JPEG 编码**。
+结论当时是「链路与 DDR 都剩 85% 以上余量，瓶颈在主机侧 JPEG 编码」。这套位流/驱动
+在 `fpga`、`driver` 的本地历史（合并提交的第一父）里仍可检出复现。
 
 ## 传感器能力与余量
 
-IMX415 本身：**12-bit 输出最高 60.3 fps，10-bit 输出最高 90.9 fps**（3840×2160）。
-
-本设计现在跑 7.85 fps/路，是**传感器时钟配置**（MCLK 12.5MHz + INCKSEL）限制的，不是通路限制。
-若放到 60 fps/路：
-
-- 每路 497 MB/s；两路写 + 推帧读 DDR3 ≈ **2 GB/s**（用户口 3.2 GB/s 的 62%，仍有余量）
-- PCIe 两路合计 ≈ **1 GB/s** ⇒ 会顶满 Gen2 ×2（需升 x4 或 Gen3）
-- 主机侧 4K JPEG 编码：单核 4K 只有 3 fps；用 `display-stream --scale 2`（CFA binning，输出 1080p）
-  已能到约 14 fps，够覆盖传感器 7.85 fps
+IMX415：12-bit 最高 60.3 fps、10-bit 最高 90.9 fps（3840×2160）。当前 7.85 fps/路是
+MCLK 12.5MHz + INCKSEL 的配置限制，不是通路限制；放到 60 fps 会顶满 Gen2 ×2（需 x4/Gen3）。
 
 ## 快速开始（板子侧）
 
 ```sh
-# 1) 驱动（默认就是 4K、两路）
-insmod anlogic_pci.ko frame_width=3840 frame_height=2160 frame_slots=1
-# 2) 下载 bit（TD 的 download_sram.tcl；热重配后需重启 RK3588 才能恢复 Gen2 ×2）
-bw.sh download_sram.tcl
-# 3) 两路节点应都在
-ls /dev/ANLOGIC-PCI0_frame /dev/ANLOGIC-PCI0_frame_b
-# 4) 起两路推流（A→8098、B→8099）
-sudo /home/orangepi/live_dual.sh
+# 1) 下载位流（TD，SRAM，易失）
+/opt/anlogic/TD_Release_2026.2_NL/bin/bw.sh download_sram.tcl
+# 2) 重启 RK3588（必须，否则枚举不到 Gen2 ×2）
+ssh orangepi@<板子IP> 'sudo reboot'
+# 3) 驱动（默认 1920×1080 / 1 槽；probe 内会 CONFIGURE + ARM 一次）
+sudo insmod anlogic_pci.ko frame_width=1920 frame_height=1080 frame_slots=1
+ls /dev/ANLOGIC-PCI0_{user,control,frame}
+# 4) 选相机 B（A 路写者待修）并取一帧
+sudo /root/tools/pci_bar 0 0x44 0x161
+sudo /home/orangepi/newdrv/rka1_smoke --arm --baseline 0 --timeout 4000
+# 5) 严格校验
+python3 driver/tools/pcie_integration/r10f_strict.py check /tmp/rka1_frame.dma --width 1920 --height 1080
 ```
-
-看视频：浏览器开 `http://<板子IP>:8098/`（A）、`http://<板子IP>:8099/`（B），
-单帧 `…/snapshot.jpg`，播放器 `ffplay http://<板子IP>:8098/stream.mjpg`，
-原始帧 `frame_grab -o a.pgm` / `frame_grab -d /dev/ANLOGIC-PCI0_frame_b -o b.pgm`。
-
-## 已知限制
-
-- 每路只有**一个槽**且推帧目标不轮换：连续推时取帧可能撞上覆盖，`frame_grab` 会报
-  「一致性不通过」（重取一次即可）；要根治需推帧引擎支持目标地址轮换 + 多槽。
-- **FPGA 热重配会把 PCIe 链路降到 Gen1 ×1**，此后 MWr 会被 RC 静默丢 ⇒ 必须重启 RK3588。
-- 只取 RAW10 的高 8 位（1 字节 1 像素）；要 16bit 通路得带宽翻倍。
-- `display-stream` 单线程编码，4K 彩色只有 3 fps；`--scale 2`（CFA binning → 1080p）约 14 fps。
 
 ## 硬件与工具链
 
-- FPGA：安路 **PH1P100SBG484**，TD `Release_2026.2`
-- 主机：**Orange Pi 5 Max / RK3588**，内核 `7.2.0-dirty`
+- FPGA：安路 **PH1P100SBG484**，TD `Release_2026.2_NL`（Linux 无头：`td.sh build.tcl`）
+- 主机：**Orange Pi 5 Max / RK3588**，内核 `7.2.0-dirty`（aarch64，NFS root）
 - 相机：**FEP-VID006-MIPI** 子卡（IMX415 ×2）
-- 时钟：`tl_clk_user` 62.5MHz、传感器 MCLK 12.5MHz（÷5）、相机字节时钟 187.5MHz、DDR3 用户时钟 100MHz
+- 交叉编译驱动：`make -C <rk3588 内核树> M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules`
