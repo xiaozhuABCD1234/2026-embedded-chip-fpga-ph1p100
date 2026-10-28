@@ -80,6 +80,13 @@ R10F 头里的 `sof_timestamp`/`timestamp_hz` 仍为 0；`bayer_phase` 字段是
 | `0x210..0x21C` | B done/status/err/tlp | 双路 |
 | `0x220..0x230` | B ACK/DST/DB | 双路 |
 | `0x234` | PAIR_STATUS | bit0=A held、bit1=B held；A err=[9:2]、B err=[17:10] |
+| `0x238/0x23C` | TS_NOW | 自由运行 64 位计数器（clk_ddr，实测 99.92 MHz），延迟测量用 |
+
+时间戳链路（延迟测量）：
+
+- writer 在 SOF 到达时锁存计数器，写进 R10F 头 16/17 字，18 字写频率（`100000000`）；
+- 主机在读帧前读 `0x238/0x23C`，两者相减即「SOF → 本机拿到帧」；
+- 这个值包含整帧读出时间（4K 约 32.4 ms），传输段要用它减去读出时间，或等后续加 EOF 时间戳直接测。
 
 错误码：0 正常、2 TL 等待超时、3 AXI 读错、5 未 ARM、6 ARM 被拒、7 取消、8 HELD 新帧、9 源不一致、10 配置被拒、11 ACK 不匹配。
 
