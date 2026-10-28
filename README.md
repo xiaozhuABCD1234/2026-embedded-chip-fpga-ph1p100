@@ -1,5 +1,7 @@
 # PH1P100 PCIe EP —— 相机采集（总仓库）
 
+> **2026-10-28 颜色/R10F 更新**：`display-stream` 已支持 R10F 解析/解包，设备源不再把 R10F 头当像素；当前安装 A/B 两路均按 **RGGB**（依据：同一办公室告示牌在 A/B 上都还原成黄色；R10F 头 0x28=3 是占位值，不可信）。详见 [display/README.md](display/README.md) 与 [docs/DATAFLOW.md](docs/DATAFLOW.md) §9.3。
+
 安路 PH1P100 做 PCIe 端点，把 MIPI 相机整帧用 MWr 写进 RK3588 内存；主机侧驱动收帧、
 用户态取帧 / 推流。
 
@@ -70,8 +72,9 @@ IMX415 ×2 ──MIPI CSI-2（4 lane）──▶ checked CSI 包层（CRC/ECC �
 
 ## 传感器能力与余量
 
-IMX415：12-bit 最高 60.3 fps、10-bit 最高 90.9 fps（3840×2160）。当前 7.85 fps/路是
-MCLK 12.5MHz + INCKSEL 的配置限制，不是通路限制；放到 60 fps 会顶满 Gen2 ×2（需 x4/Gen3）。
+IMX415：12-bit 最高 60.3 fps、10-bit 最高 90.9 fps（3840×2160）。当前代码/近期记录是
+MCLK 27 MHz、30 fps/路；7.85 fps 是更早 12.5 MHz 配置的历史值，不是当前上限。放到 60 fps
+会顶满 Gen2 ×2（需 x4/Gen3）。
 
 ## 快速开始（板子侧）
 
@@ -87,7 +90,7 @@ ls /dev/ANLOGIC-PCI0_{user,control,frame}
 sudo /root/tools/pci_bar 0 0x44 0x161
 sudo /home/orangepi/newdrv/rka1_smoke --arm --baseline 0 --timeout 4000
 # 5) 严格校验
-python3 driver/tools/pcie_integration/r10f_strict.py check /tmp/rka1_frame.dma --width 1920 --height 1080
+python3 driver/docs/protocol/rka1-r10f-v1/tools/r10f_strict.py check /tmp/rka1_frame.dma --width 1920 --height 1080
 ```
 
 ## 硬件与工具链
