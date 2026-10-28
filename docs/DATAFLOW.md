@@ -81,6 +81,8 @@ R10F 头里的 `sof_timestamp`/`timestamp_hz` 仍为 0；`bayer_phase` 字段是
 | `0x220..0x230` | B ACK/DST/DB | 双路 |
 | `0x234` | PAIR_STATUS | bit0=A held、bit1=B held；A err=[9:2]、B err=[17:10] |
 | `0x238/0x23C` | TS_NOW | 自由运行 64 位计数器（clk_ddr，实测 99.92 MHz），延迟测量用 |
+| `0x240` | ALGO_CTRL | R/W：[2:1] 选路 0=灰度、1=高斯、2=直方图均衡；bit0 保留 |
+| `0x244/0x248/0x24C` | ALGO_ACC/REJ/OVF | ROI 适配器收下/拒绝/溢出的帧数 |
 
 时间戳链路（延迟测量）：
 
