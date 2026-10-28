@@ -83,6 +83,7 @@ R10F 头里的 `sof_timestamp`/`timestamp_hz` 仍为 0；`bayer_phase` 字段是
 | `0x238/0x23C` | TS_NOW | 自由运行 64 位计数器（clk_ddr，实测 99.92 MHz），延迟测量用 |
 | `0x240` | ALGO_CTRL | R/W：[2:1] 选路 0=灰度、1=高斯、2=直方图均衡；bit0 保留 |
 | `0x244/0x248/0x24C` | ALGO_ACC/REJ/OVF | ROI 适配器收下/拒绝/溢出的帧数 |
+| `0x250..0x25C` | CODEC 状态 | 压缩字节数 / 原始长度 / 原始 CRC32 / {fed, aborts} |
 
 时间戳链路（延迟测量）：
 
