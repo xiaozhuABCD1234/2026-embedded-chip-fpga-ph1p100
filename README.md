@@ -71,7 +71,8 @@ ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
 | RKNN YOLO11n（960×544） | 21.9 pair/s，单路推理约 40 ms |
 | 硬件同步 | A 主/B 从，`0x1E4=0x8000D`，skew 2~3 tick（约 32~48 ns），miss=0 |
 
-完整表格与证据见 [docs/BOARD_TEST.md](docs/BOARD_TEST.md)。
+完整表格与证据见 [docs/BOARD_TEST.md](docs/BOARD_TEST.md)；
+六项交付项的状态与量化数据见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
 
 ## 已知边界
 
