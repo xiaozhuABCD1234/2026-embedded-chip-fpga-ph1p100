@@ -1,116 +1,88 @@
-# PH1P100 PCIe EP —— 双路相机采集
+# PH1P100 PCIe EP —— IMX415 4K30 全帧采集
 
-> 当前事实：**2026-10-28**。A/B 两路均为 1080p R10F，自由采集各约 30 fps；硬件同步已上板锁定。
-> 主机现在用 **两片 pusher + 两个 host 槽 + 一次 `ARM_PAIR/ACK_PAIR`** 同时取同一曝光对：
-> `frame_grab --pair`，一次拿 A/B 两帧；实时 display 用 `--source device-pair`，同一页看 A/B。以本文和
-> [docs/DATAFLOW.md](docs/DATAFLOW.md) 为准，旧日志/旧文档只作历史。
-
-安路 PH1P100SBG484 做 PCIe Gen2 x2 端点，把两路 IMX415 的 MIPI CSI-2 整帧写进 RK3588
-内存；RK3588 侧驱动提供字符节点，用户态取帧、显示/推流。
-
-## 子仓库
+安路 PH1P100SBG484 做 PCIe Gen2 ×2 端点，把 IMX415 的整帧 RAW10 写进 RK3588 内存；
+RK3588 侧驱动提供字符节点，用户态取帧、显示/推流。
 
 | 目录 | 仓库 | 职责 |
 |---|---|---|
-| `fpga/` | `ph1p100-pcie-ep-fpga` | MIPI CSI-2 接收、R10F 写者、DDR3、双路 one-shot 推帧、BAR0/RKA1 |
-| `driver/` | `ph1p100-pcie-ep-driver` | RK3588 Linux 驱动、一致性收帧缓冲、ioctl 与 Rust 工具 |
-| `display/` | `ph1p100-pcie-ep-display` | MJPEG/快照 HTTP、R10F 解析、Bayer/后处理 |
+| `fpga/` | `ph1p100-pcie-ep-fpga` | MIPI CSI-2 接收、R10F 写者、DDR3、one-shot 推帧、BAR0/RKA1 |
+| `driver/` | `ph1p100-pcie-ep-driver` | RK3588 内核模块、一致性收帧缓冲、ioctl 与 Rust 工具 |
+| `display/` | `ph1p100-pcie-ep-display` | MJPEG/快照 HTTP、R10F 解析、Bayer/后处理、RKNN 叠加 |
 
-## 当前数据通路
+## 数据通路
 
-```mermaid
+~~~mermaid
 flowchart LR
-  A[IMX415 A] -->|MIPI CSI-2 4-lane| CA[checked CSI A]
-  B[IMX415 B] -->|MIPI CSI-2 4-lane| CB[checked CSI B]
-  CA --> GA[sync gate A]
-  CB --> GB[sync gate B]
-  GA --> WA[R10F writer A]
-  GB --> WB[R10F writer B]
-  WA --> DA[DDR3 A 双缓冲]
-  WB --> DB[DDR3 B 双缓冲]
-  DA --> PA[pusher A]
-  DB --> PB[pusher B]
-  PA --> AR[DDR 读仲裁 / TL 帧级仲裁]
-  PB --> AR
-  AR -->|PCIe Gen2 x2| H[槽 A + 槽 B + mailbox]
-  H --> D[frame_grab --pair / display --source device-pair]
-```
+  CAM["IMX415 4K30"] -->|"MIPI CSI-2 4-lane"| CSI["checked CSI"]
+  CSI --> W["cam_r10f_writer"]
+  W --> DDR[("DDR3 双缓冲")]
+  DDR --> P["ddr_frame_pusher"]
+  P -->|"PCIe Gen2 ×2 Posted MWr"| MEM["主机一致性缓冲"]
+  MEM --> DEV["/dev/ANLOGIC-PCI0_frame"]
+  DEV --> GRAB["frame_grab / r10f_check"]
+  DEV --> DISP["display-stream → HTTP"]
+~~~
 
-- 帧格式：1920×1080 packed RAW10，stride 2400 B，payload 2,592,000 B；
-  R10F 128 B 头 + payload + 640 B 尾 = **2,592,768 B/帧**。
-- 推帧：一次 ARM 只授权一帧，20256 笔 128 B MWr + 1 笔门铃；推完 HELD，ACK 才释放。
-- 双路：A/B 各一片 pusher，两片共享 DDR 读口和 TL 用户发送口（帧级仲裁，不交错）；
-  `ARM_PAIR` 同时授权两片，`ACK_PAIR` 同时释放。
-- 取流：槽 0 = A、槽 1 = B；B 门铃在 mailbox +36。驱动默认 `frame_slots=2`。
+细节（寄存器、缓冲布局、诊断位域）见 [docs/DATAFLOW.md](docs/DATAFLOW.md)。
 
-## 2026-10-28 实测
+## 帧契约
 
-| 项 | 结果 |
-|---|---|
-| 双路自由采集 | A/B 各 **29.993 fps**（30 s 计数，丢组 0） |
-| 主机双路 pair | 纯取帧 **30.0 pair/s**（60 帧/s，PCIe ~155 MB/s）；600/600 次成功；A/B `capture_seq` 全相同 |
-| 实时 display 1080p | **11 pair/s**（每对 ~90 ms，VEPU121 硬编码） |
-| 实时 display 540p | **23 pair/s**（每对 ~43 ms） |
-| 链路 | Gen2 x2，BAR0 1 MB |
-| 硬件同步 | A 主/B 从，XHS/XVS 共享；`0x1E4=0x8000D`，warmup=8，locked=1 |
-| 同步 skew | `0x1E8` 稳定 2~3 tick（62.5 MHz，约 32~48 ns），miss=0 |
-| 同步启动 | 首次 9 对锁定；abort 后重新 start 可再锁 |
+| 量 | 值 |
+|---|---:|
+| 图像 | 3840×2160 packed RAW10，stride 4800 B |
+| payload | 10,368,000 B |
+| 整帧 | 128 B 头 + payload + 2,944 B 尾零 = **10,371,072 B**（2532 × 4 KiB） |
+| 每帧 MWr | 81,024 笔 128 B + 1 笔门铃 |
+| DDR 双缓冲 | A0=0x0100_0000、A1=0x0200_0000（B0/B1=0x0300_0000/0x0400_0000） |
 
-同步的板测记录与图像：[log/board-20261028/sync_20261028/RESULTS.md](log/board-20261028/sync_20261028/RESULTS.md)。
-
-## 硬件同步（已上板）
-
-- A：`XMASTER=0`、`XMSTA=1→0`、`XVS/XHS_DRV=0`（输出）；
-- B：`XMASTER=1`、`XMSTA=0`、`XVS/XHS_DRV=0x0F`（Hi-Z 从机）；
-- FPGA 不发同步脉冲，只做角色配置、SOF 配对和帧边界门控；
-- BAR：`0x1E0 SYNC_CMD`（W1：1=START，2=ABORT），`0x1E4..0x20C` 状态；
-- 主机：`link_ctl sync status|start|abort`。
-
-详细寄存器、判据和双路实现见 [docs/SYNC_DUAL_20261028.md](docs/SYNC_DUAL_20261028.md)。
-RKNN 检测的模型契约、线程与板测见 [docs/RKNN_YOLO11_20261028.md](docs/RKNN_YOLO11_20261028.md)。
+**4K 全帧尚未上板验证**：RTL 已按上述几何与基址改好，板测数字仍全部是 1080p ROI 口径。
 
 ## 快速开始（板子）
 
-```sh
-# 1) 下载 SRAM 位流（本地 TD；板卡随后必须重启才能重新枚举 Gen2 x2）
+~~~sh
+# 1) 下载 SRAM 位流（本地 TD；板卡随后必须重启才能重新枚举 Gen2 ×2）
 cd fpga
 /opt/anlogic/TD_Release_2026.2_NL/bin/bw.sh download_sram.tcl
 ssh root@<BOARD> 'sync; reboot'
 
-# 2) 驱动（默认 1920x1080 / 两槽）
-ssh root@<BOARD> 'insmod /root/anlogic_pci.ko frame_width=1920 frame_height=1080 frame_slots=2'
+# 2) 驱动（几何与槽数按当前 RTL 给）
+ssh root@<BOARD> 'insmod /root/anlogic_pci.ko frame_width=3840 frame_height=2160'
 ssh root@<BOARD> 'ls /dev/ANLOGIC-PCI0_{user,control,frame}'
 
-# 3) 启动硬件同步；等到 locked=1
-ssh root@<BOARD> '/root/link_ctl sync start -t 5000'
+# 3) 取一帧（离线 PGM）
+ssh root@<BOARD> '/root/frame_grab -t 3000 -o /dev/shm/a.pgm'
 
-# 4) 双路同步取一帧（离线 PGM）
-ssh root@<BOARD> '/root/frame_grab --pair -t 3000 -o /dev/shm/a.pgm /dev/shm/b.pgm'
+# 4) 实时页
+ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
+# 浏览器打开 http://<BOARD>:8091/
+~~~
 
-# 5) 双路实时页（A/B 并排）
-ssh root@<BOARD> '/root/display-pair --source device-pair --fps 30 --port 8091'
-# 浏览器打开 http://<BOARD>:8091/pair
+双路（1080p ROI 时代的能力，仍可用）：先 `link_ctl sync start -t 5000`，再 `frame_grab --pair` 或
+`display-pair --source device-pair`；见 [docs/HARDWARE_SYNC.md](docs/HARDWARE_SYNC.md)。
 
-# 6) 双路 + RKNN YOLO11n 检测/叠加（需要 /root/models/yolo11n-640-int8.rknn）
-ssh root@<BOARD> '/root/display-detect --source device-pair --fps 30 --scale 2 \
-  --detect --rknn /root/models/yolo11n-640-int8.rknn --port 8091'
-```
+## 实测（1080p ROI 双路，2026-10-28）
 
-> `frame_grab --pair` 自己写 B 路目标/门铃并做 `ARM_PAIR/ACK_PAIR`；不需要再调
-> `link_ctl arm`。单路 A 仍用 `frame_grab -t 3000 -o a.pgm`。
+| 项 | 结果 |
+|---|---|
+| 双路自由采集 | A/B 各 29.993 fps，丢组 0 |
+| 纯取帧 | 30.4 pair/s（60 帧/s，PCIe ~155 MB/s） |
+| 双路 pair 取帧 | 600/600 成功（180 s），A/B `capture_seq` 全相同 |
+| display 1080p / 540p | 11 pair/s / 23 pair/s |
+| RKNN YOLO11n（960×544） | 21.9 pair/s，单路推理约 40 ms |
+| 硬件同步 | A 主/B 从，`0x1E4=0x8000D`，skew 2~3 tick（约 32~48 ns），miss=0 |
+
+完整表格与证据见 [docs/BOARD_TEST.md](docs/BOARD_TEST.md)。
 
 ## 已知边界
 
-- 当前没有把 `sync_pairs` 打进 R10F 头；严格“同对”靠硬件同步门控 + 同一次 ARM。
-- 实时 display 已接 `device-pair`：`/pair` 并排看 A/B，`/snapshot_a.jpg`、`/snapshot_b.jpg`、`/stats`。
-- R10F 的 `sof_timestamp/timestamp_hz` 仍为 0；同步证据先看 BAR `0x1E8/0x1EC`。
-- `0x1E8` 是 SOF/包层数字配对差，**不是曝光相位差**；不能拿它闭环曝光。
-- 主从共享 XHS/XVS 的模组内部连接仍需示波器/实物连续性确认。
+- 4K 全帧、4K+同步、MSI 中断、故障注入都没有板测数据。
+- R10F 的 `sof_timestamp/timestamp_hz` 仍为 0；`bayer_phase` 是 RTL 占位推导，不是测量值。
+- `0x1E8` 是 SOF/包层数字配对差，不是曝光相位差。
 - 位流是 SRAM 配置：重下/掉电后必须重启 RK3588。
-- 根 `log/` 是本地证据，默认被 gitignore；git clean 前先归档。
+- 根 `log/` 是本地证据（gitignore），只放每专题一份 RESULTS 与少量图。
 
 ## 硬件与工具链
 
-- FPGA：PH1P100SBG484，TD `Release_2026.2_NL`（Linux 无头：`td.sh build.tcl`）
+- FPGA：PH1P100SBG484，TD `Release_2026.2_NL`（无头：`td.sh build.tcl`）
 - 主机：Orange Pi 5 Max / RK3588，内核 `7.2.0-dirty`（aarch64，NFS root）
-- 相机：FEP-VID006-MIPI 子卡（IMX415 ×2，CAM005 模组）
+- 相机：FEP-VID006-MIPI 子卡（IMX415 ×2，CAM005 模组），27 MHz / 891 Mbps ×4 lane
