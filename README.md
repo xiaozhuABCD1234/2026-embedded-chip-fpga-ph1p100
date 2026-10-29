@@ -1,7 +1,8 @@
-# PH1P100 PCIe EP —— IMX415 4K30 全帧采集
+# PH1P100 × RK3588 —— 4K 采集 / 硬件 JPEG / PCIe / NPU 全链路
 
-安路 PH1P100SBG484 做 PCIe Gen2 ×2 端点，把 IMX415 的整帧 RAW10 写进 RK3588 内存；
-RK3588 侧驱动提供字符节点，用户态取帧、显示/推流。
+安路 PH1P100SBG484 做 PCIe Gen2 ×2 端点：一条 4K30 全帧 RAW10 直传通路，
+一条 1080p ROI 灰度的**硬件 JPEG 压缩**通路（约 95% 压缩率），压缩流经 PCIe
+回传后由 RK3588 解码、RKNN 检测并叠加。RK3588 驱动提供字符节点供取帧/推流。
 
 | 目录 | 仓库 | 职责 |
 |---|---|---|
@@ -15,12 +16,15 @@ RK3588 侧驱动提供字符节点，用户态取帧、显示/推流。
 flowchart LR
   CAM["IMX415 4K30"] -->|"MIPI CSI-2 4-lane"| CSI["checked CSI"]
   CSI --> W["cam_r10f_writer"]
+  CSI --> A["灰度/高斯/HE + ROI"] --> J["硬件 JPEG"] --> CB[("压缩块 0x0500_0000")]
   W --> DDR[("DDR3 双缓冲")]
   DDR --> P["ddr_frame_pusher"]
+  CB --> P
   P -->|"PCIe Gen2 ×2 Posted MWr"| MEM["主机一致性缓冲"]
   MEM --> DEV["/dev/ANLOGIC-PCI0_frame"]
   DEV --> GRAB["frame_grab / r10f_check"]
   DEV --> DISP["display-stream → HTTP"]
+  DEV --> NPU["解码 + RKNN 叠加"]
 ~~~
 
 细节（寄存器、缓冲布局、诊断位域）见 [docs/DATAFLOW.md](docs/DATAFLOW.md)。
@@ -34,6 +38,9 @@ flowchart LR
 | 整帧 | 128 B 头 + payload + 2,944 B 尾零 = **10,371,072 B**（2532 × 4 KiB） |
 | 每帧 MWr | 81,024 笔 128 B + 1 笔门铃 |
 | DDR 双缓冲 | A0=0x0100_0000、A1=0x0200_0000（B0/B1=0x0300_0000/0x0400_0000） |
+
+（上表是 **4K 采集位流**的契约；JPEG 位流的 1920×1088 灰度/压缩块契约见
+[CODEC](docs/CODEC.md)。）
 
 ## 快速开始（板子）
 
