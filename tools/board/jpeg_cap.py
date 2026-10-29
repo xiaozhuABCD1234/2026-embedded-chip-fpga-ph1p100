@@ -102,14 +102,19 @@ def main() -> int:
         done0 = (bar_read(0x258) >> 16) & 0xFFFF
         print(f'开压缩（ALGO_CTRL=0x{ALGO_COMPRESS:02x}），基线 jb_done={done0}，'
               f'最多等 {args.compress_timeout}s')
+        cw0 = bar_read(0x26C)
         bar_write(0x240, ALGO_COMPRESS)
         t0 = time.time()
         while time.time() - t0 < args.compress_timeout:
             if ((bar_read(0x258) >> 16) & 0xFFFF) != done0:
                 break
             time.sleep(0.05)
-        # writer 还要把尾部补零写完（整帧 2.6MB，约 0.8ms），留足余量
-        time.sleep(0.05)
+        # jb_done 只表示熵流结束；writer 还要把最后一个 beat/补零写完。
+        # 直接切 0x40 会复位 writer，丢掉尾拍（板测表现为解码 broken data stream）。
+        t1 = time.time()
+        while time.time() - t1 < 0.5 and bar_read(0x26C) == cw0:
+            time.sleep(0.002)
+        time.sleep(0.005)
     n = dump_debug()
     if n <= 0:
         print('压缩没有产出：看上面的 rd/cw 状态', file=sys.stderr)
