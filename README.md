@@ -78,7 +78,8 @@ ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
 
 ## 已知边界
 
-- 4K 全帧已单路验证；双路 4K、4K+同步、MSI 中断、故障注入都没有板测数据。
+- 4K30 全帧在 4K 采集位流上验证；当前 JPEG 位流走 1080p ROI，两个位流分开。
+- 双路 4K、4K+同步、MSI 中断、故障注入都没有板测数据。
 - 压缩支路 ~4.5 fps，非实时；编码器 65.7 ms/帧，整帧周期受相机写者/源缓冲握手限制。
 - 压缩→NPU 全链路已打通（`tools/board/fpga_jpeg_npu.py`），但受压缩帧率限制，~2 fps 端到端。
 - R10F 的 `sof_timestamp/timestamp_hz` 仍为 0；`bayer_phase` 是 RTL 占位推导，不是测量值。
