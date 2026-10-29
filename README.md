@@ -73,7 +73,7 @@ ssh root@<BOARD> 'python3 /tmp/fpga_jpeg_npu.py --frames 3 --show-detections'
 | display 1080p / 540p | 11 pair/s / 23 pair/s |
 | RKNN YOLO11n（960×544） | 21.9 pair/s，单路推理约 40 ms |
 | 硬件同步 | A 主/B 从，`0x1E4=0x8000D`，skew 2~3 tick（约 32~48 ns），miss=0 |
-| 硬件 JPEG 压缩 | 1920×1088 灰度，95.5%，7.5~8.5 fps（180 s 长稳） |
+| 硬件 JPEG 压缩 | 1920×1088 灰度，95.5%，7.5~8.5 fps（1 h 长稳 26,965 帧） |
 | 压缩→RKNN 全链路 | 解码 18 ms + 推理 45 ms，4~10 个目标（随场景），标注图入库 |
 
 完整表格与证据见 [docs/BOARD_TEST.md](docs/BOARD_TEST.md)；六项交付状态见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
@@ -84,7 +84,7 @@ ssh root@<BOARD> 'python3 /tmp/fpga_jpeg_npu.py --frames 3 --show-detections'
 
 - 4K30 全帧在 4K 采集位流上验证（`fpga` 提交 `27bcd9ff`）；当前 JPEG 位流走 1080p ROI。
 - 双路 4K、4K+同步、MSI 中断、故障注入都没有板测数据。
-- 压缩支路 7.5~8.5 fps，非实时；编码器 65.7 ms/帧，剩余 ~50 ms 是等下一帧发布。
+- 压缩支路 7.5~8.5 fps，非实时；1 h 长稳 26,965 帧通过，编码器 65.7 ms/帧。
 - 压缩→NPU 全链路已打通（`tools/board/fpga_jpeg_npu.py`），但受压缩帧率限制，~2 fps 端到端。
 - R10F 的 `sof_timestamp/timestamp_hz` 仍为 0；`bayer_phase` 是 RTL 占位推导，不是测量值。
 - `0x1E8` 是 SOF/包层数字配对差，不是曝光相位差。
