@@ -103,6 +103,8 @@ DDR 灰度帧 → cstream_reader（5→4 拆包）→ line2block → dct2d8
 | `0x264` | 编解码状态 | `{reader state, writer state, busy}` |
 | `0x268` | 读口握手 | DDR 读口握手 |
 | `0x26C` | 压缩帧序号 | 压缩帧序号 |
+| `0x270` | 首字节延迟 | rd_start→首个压缩字节的周期数（只读） |
+| `0x274` | 整帧延迟 | rd_start→`jb_done` 的周期数（只读） |
 
 时间戳链路（延迟测量）：
 
