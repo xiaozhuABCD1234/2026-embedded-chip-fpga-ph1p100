@@ -94,7 +94,7 @@ DDR 灰度帧 → cstream_reader（5→4 拆包）→ line2block → dct2d8
 | `0x220..0x230` | B ACK/DST/DB | 双路 |
 | `0x234` | PAIR_STATUS | bit0=A held、bit1=B held；A err=[9:2]、B err=[17:10] |
 | `0x238/0x23C` | TS_NOW | 自由运行 64 位计数器（clk_ddr，实测 99.92 MHz），延迟测量用 |
-| `0x240` | ALGO_CTRL | R/W：[2:1] 选路 0=灰度、1=高斯、2=直方图均衡；bit4=压缩使能；bit6=推压缩块（与 bit4 互斥） |
+| `0x240` | ALGO_CTRL | R/W：[2:1] 选路 0=灰度、1=高斯、2=直方图均衡；bit4=压缩使能（只可在帧边界切换）；bit6=推压缩块（与 bit4 互斥） |
 | `0x244/0x248/0x24C` | ALGO_ACC/REJ/OVF | ROI 适配器收下/拒绝/溢出的帧数 |
 | `0x250` | 压缩流长度 | 最近完成压缩帧的熵流字节数 |
 | `0x254` | 回读像素 | 累计回读像素（诊断） |
