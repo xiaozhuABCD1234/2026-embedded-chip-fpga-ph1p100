@@ -62,6 +62,9 @@ ssh root@<BOARD> 'python3 /tmp/fpga_jpeg_npu.py --frames 3 --show-detections'
 双路（1080p ROI 时代的能力，仍可用）：先 `link_ctl sync start -t 5000`，再 `frame_grab --pair` 或
 `display-pair --source device-pair`；见 [docs/HARDWARE_SYNC.md](docs/HARDWARE_SYNC.md)。
 
+驱动与板端工具（`pci_bar`/`link_ctl`/`frame_grab`）的构建部署见 [driver/README.md](driver/README.md)；
+显示与 NPU 推流见 [display/README.md](display/README.md)。
+
 ## 实测（2026-10-28/29）
 
 | 项 | 结果 |
