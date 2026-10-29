@@ -6,9 +6,11 @@
 
 | 目录 | 仓库 | 职责 |
 |---|---|---|
-| `fpga/` | `ph1p100-pcie-ep-fpga` | MIPI CSI-2 接收、R10F 写者、DDR3、one-shot 推帧、BAR0/RKA1 |
-| `driver/` | `ph1p100-pcie-ep-driver` | RK3588 内核模块、一致性收帧缓冲、ioctl 与 Rust 工具 |
-| `display/` | `ph1p100-pcie-ep-display` | MJPEG/快照 HTTP、R10F 解析、Bayer/后处理、RKNN 叠加 |
+| `fpga/` | [`ph1p100-pcie-ep-fpga`](https://github.com/xiaozhuABCD1234/ph1p100-pcie-ep-fpga) | MIPI CSI-2 接收、R10F 写者、DDR3、JPEG 压缩、one-shot 推帧、BAR0/RKA1 |
+| `driver/` | [`ph1p100-pcie-ep-driver`](https://github.com/xiaozhuABCD1234/ph1p100-pcie-ep-driver) | RK3588 内核模块、一致性收帧缓冲、ioctl 与 Rust 工具 |
+| `display/` | [`ph1p100-pcie-ep-display`](https://github.com/xiaozhuABCD1234/ph1p100-pcie-ep-display) | MJPEG/快照 HTTP、R10F 解析、Bayer/后处理、RKNN 叠加 |
+
+主仓：[`2026-embedded-chip-fpga-ph1p100`](https://github.com/xiaozhuABCD1234/2026-embedded-chip-fpga-ph1p100)。
 
 ## 数据通路
 
