@@ -43,8 +43,8 @@ cd fpga
 /opt/anlogic/TD_Release_2026.2_NL/bin/bw.sh download_sram.tcl
 ssh root@<BOARD> 'sync; reboot'
 
-# 2) 驱动（几何与槽数按当前 RTL 给）
-ssh root@<BOARD> 'insmod /root/anlogic_pci.ko frame_width=3840 frame_height=2160'
+# 2) 驱动：当前 JPEG 位流是 1920×1088；4K 采集位流改 frame_width=3840 frame_height=2160
+ssh root@<BOARD> 'insmod /root/anlogic_pci.ko frame_width=1920 frame_height=1088 frame_slots=1'
 ssh root@<BOARD> 'ls /dev/ANLOGIC-PCI0_{user,control,frame}'
 
 # 3) 取一帧（离线 PGM）
@@ -53,6 +53,10 @@ ssh root@<BOARD> '/root/frame_grab -t 3000 -o /dev/shm/a.pgm'
 # 4) 实时页
 ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
 # 浏览器打开 http://<BOARD>:8091/
+
+# 5) 压缩→PCIe→RKNN 全链路（约 8 fps，输出 /tmp/fpga_npu.jpg）
+scp tools/board/fpga_jpeg_npu.py root@<BOARD>:/tmp/
+ssh root@<BOARD> 'python3 /tmp/fpga_jpeg_npu.py --frames 3 --show-detections'
 ~~~
 
 双路（1080p ROI 时代的能力，仍可用）：先 `link_ctl sync start -t 5000`，再 `frame_grab --pair` 或
@@ -78,7 +82,7 @@ ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
 
 ## 已知边界
 
-- 4K30 全帧在 4K 采集位流上验证；当前 JPEG 位流走 1080p ROI，两个位流分开。
+- 4K30 全帧在 4K 采集位流上验证（`fpga` 提交 `27bcd9ff`）；当前 JPEG 位流走 1080p ROI。
 - 双路 4K、4K+同步、MSI 中断、故障注入都没有板测数据。
 - 压缩支路 7.5~8.5 fps，非实时；编码器 65.7 ms/帧，剩余 ~50 ms 是等下一帧发布。
 - 压缩→NPU 全链路已打通（`tools/board/fpga_jpeg_npu.py`），但受压缩帧率限制，~2 fps 端到端。
