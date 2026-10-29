@@ -134,6 +134,65 @@ def cost_of(dct_blocks, q):
     return (bits + 7) // 8
 
 
+def encode_entropy(img, quality=50):
+    """对整帧灰度图做完整 JPEG 编码，返回**纯熵编码字节流**（无任何标记段）。
+
+    与 jpeg_frame.v 的输出同构：DC 差分 + AC 游程 + 标准 DC/AC 亮度表 +
+    0xFF 后补 0x00；只在帧末补 1 到字节边界。可直接交给
+    tools/jpeg_file.py 的 build_jpeg() 包成标准 .jpg。
+    """
+    img = np.asarray(img, dtype=np.float64)
+    if img.ndim != 2:
+        raise ValueError('encode_entropy 只接受单通道灰度图')
+    H, W = img.shape
+    ph = (H + 7) // 8 * 8
+    pw = (W + 7) // 8 * 8
+    pad = np.full((ph, pw), 128.0, np.float64)
+    pad[:H, :W] = img
+    pad -= 128.0
+
+    q = scale_q(LUMA_Q, quality)
+    w = BitWriter()
+    prev_dc = 0
+    for by in range(0, ph, 8):
+        for bx in range(0, pw, 8):
+            F = dct8(pad[by:by+8, bx:bx+8])
+            z = np.round(F / q).astype(np.int32).ravel()[ZZ]
+            diff = int(z[0]) - prev_dc
+            prev_dc = int(z[0])
+            c = category(diff)
+            if c not in DCC:
+                raise ValueError('DC 类别 %d 超出标准亮度表' % c)
+            code, ln = DCC[c]
+            w.put(code, ln)
+            if c:
+                w.put(diff - 1 if diff < 0 else diff, c)
+
+            run = 0
+            for k in range(1, 64):
+                v = int(z[k])
+                if v == 0:
+                    run += 1
+                    continue
+                while run > 15:
+                    code, ln = ACC[0xF0]
+                    w.put(code, ln)
+                    run -= 16
+                c = category(v)
+                sym = (run << 4) | c
+                if sym not in ACC:
+                    raise ValueError('AC 符号 0x%02X 不在标准亮度表中' % sym)
+                code, ln = ACC[sym]
+                w.put(code, ln)
+                w.put(v - 1 if v < 0 else v, c)
+                run = 0
+            if run:
+                code, ln = ACC[0x00]
+                w.put(code, ln)
+    w.flush()
+    return bytes(w.out)
+
+
 def run(img, quality, path=None):
     H, W = img.shape
     ph = (H + 7) // 8 * 8

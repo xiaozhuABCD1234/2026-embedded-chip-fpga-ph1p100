@@ -53,7 +53,20 @@ R10F 头里的 `sof_timestamp`/`timestamp_hz` 仍为 0；`bayer_phase` 字段是
 4. `ddr_frame_pusher` 把已发布块打成 4DW 头 + 128 B 载荷的 MWr；推完进 HELD，匹配 ACK 才释放源块。
 5. 主机槽 0 收帧，A 门铃在 mailbox +32（B 路 +36）。驱动补 16 B 槽头与 `mailbox.seq/count`。
 
-`CAMDDR_SKIP_ROWS=37` 是 1080p ROI 时代的板测标定值，4K 全帧尚未复测。
+1080p ROI 时代用 `CAMDDR_SKIP_ROWS=37`；4K 全帧改用 `X_OFF=12`、`SKIP_ROWS=16`，避免吃掉左右 OB 列与顶部哑行（见 [BOARD_TEST](BOARD_TEST.md) §8）。
+
+### 压缩支路
+
+压缩不接实时 CSI 流，而是回读 DDR 里已发布的 1920×1088 灰度帧，避开 4 行 FIFO 的反压：
+
+~~~text
+DDR 灰度帧 → cstream_reader（5→4 拆包）→ line2block → dct2d8
+           → jpeg_quant_zz → jpeg_huff_enc → cstream_writer（0x0500_0000 定长帧）
+~~~
+
+- 熵流补零到 2,613,248 B，真实长度在 `0x250`；主机按长度截取后补 JFIF 头。
+- DDR 读口与推帧分时：`0x240=0x10` 压缩，`0x240=0x40` 切推帧源。
+- 详见 [CODEC](CODEC.md)。
 
 ## 4. 寄存器
 
@@ -81,9 +94,15 @@ R10F 头里的 `sof_timestamp`/`timestamp_hz` 仍为 0；`bayer_phase` 字段是
 | `0x220..0x230` | B ACK/DST/DB | 双路 |
 | `0x234` | PAIR_STATUS | bit0=A held、bit1=B held；A err=[9:2]、B err=[17:10] |
 | `0x238/0x23C` | TS_NOW | 自由运行 64 位计数器（clk_ddr，实测 99.92 MHz），延迟测量用 |
-| `0x240` | ALGO_CTRL | R/W：[2:1] 选路 0=灰度、1=高斯、2=直方图均衡；bit0 保留 |
+| `0x240` | ALGO_CTRL | R/W：[2:1] 选路 0=灰度、1=高斯、2=直方图均衡；bit4=压缩使能；bit6=推压缩块（与 bit4 互斥） |
 | `0x244/0x248/0x24C` | ALGO_ACC/REJ/OVF | ROI 适配器收下/拒绝/溢出的帧数 |
-| `0x250..0x25C` | CODEC 状态 | 压缩字节数 / 原始长度 / 原始 CRC32 / {fed, aborts} |
+| `0x250` | 压缩流长度 | 最近完成压缩帧的熵流字节数 |
+| `0x254` | 回读像素 | 累计回读像素（诊断） |
+| `0x258` | JPEG 状态 | `{jb_done[31:16], jb_v[15:0]}` |
+| `0x260` | 回读启动计数 | 回读启动次数 |
+| `0x264` | 编解码状态 | `{reader state, writer state, busy}` |
+| `0x268` | 读口握手 | DDR 读口握手 |
+| `0x26C` | 压缩帧序号 | 压缩帧序号 |
 
 时间戳链路（延迟测量）：
 
@@ -121,12 +140,12 @@ phys + 2*stride : mailbox（A 门铃 +32，B 门铃 +36；frame_slots=1 时是 p
 | +0x18 | 收口时刻的 gcnt |
 | +0x1C | `{tmo_seen, p_bad, p_eof_seen, eof_bad}` |
 
-> 组数是按当前几何算的：满帧 3840×2160 每 5 B 一组 = 2,073,600 组（1080p 时代为 518,400）。该值 4K 未上板核对。
+> 组数是按当前几何算的：满帧 3840×2160 每 5 B 一组 = 2,073,600 组（1080p 时代为 518,400）；4K 满帧已在板上核对。
 
 ## 7. 边界
 
-- **4K 全帧未上板验证**：RTL 已按 3840×2160 全帧与上述 DDR 基址改好，但没有任何 4K 板测数字。
-- 4K30 单路带宽算术值 10,371,072 × 30 ≈ 311 MB/s，占 Gen2 x2 可用带宽约 30%，未实测。
+- **4K30 全帧单路已上板**：29.9 fps、丢组 0；双路 4K 不可行（单路打包已占 78%），4K+硬件同步未验证。
+- 4K30 单路整帧 10,371,072 B × 29.9 ≈ 310 MB/s；链路实测传输段约 519 MB/s，Gen2 ×2 有余量。
 - 位流是 SRAM 配置：重下/掉电后必须重启 RK3588 才能重新枚举 Gen2 x2。
 - `sync_pairs` 没有打进 R10F 头；严格「同对」靠硬件同步门控 + 同一次 ARM。
 - PCIe 上 A/B 串行发送，不是同时占用链路。

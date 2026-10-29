@@ -35,8 +35,6 @@ flowchart LR
 | 每帧 MWr | 81,024 笔 128 B + 1 笔门铃 |
 | DDR 双缓冲 | A0=0x0100_0000、A1=0x0200_0000（B0/B1=0x0300_0000/0x0400_0000） |
 
-**4K 全帧尚未上板验证**：RTL 已按上述几何与基址改好，板测数字仍全部是 1080p ROI 口径。
-
 ## 快速开始（板子）
 
 ~~~sh
@@ -60,23 +58,27 @@ ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
 双路（1080p ROI 时代的能力，仍可用）：先 `link_ctl sync start -t 5000`，再 `frame_grab --pair` 或
 `display-pair --source device-pair`；见 [docs/HARDWARE_SYNC.md](docs/HARDWARE_SYNC.md)。
 
-## 实测（1080p ROI 双路，2026-10-28）
+## 实测（2026-10-28/29）
 
 | 项 | 结果 |
 |---|---|
-| 双路自由采集 | A/B 各 29.993 fps，丢组 0 |
+| 4K30 单路采集 | 3840×2160@29.9 fps，丢组 0（2026-10-29） |
+| 双路自由采集 | A/B 各 29.993 fps，丢组 0（1080p ROI） |
 | 纯取帧 | 30.4 pair/s（60 帧/s，PCIe ~155 MB/s） |
 | 双路 pair 取帧 | 600/600 成功（180 s），A/B `capture_seq` 全相同 |
 | display 1080p / 540p | 11 pair/s / 23 pair/s |
 | RKNN YOLO11n（960×544） | 21.9 pair/s，单路推理约 40 ms |
 | 硬件同步 | A 主/B 从，`0x1E4=0x8000D`，skew 2~3 tick（约 32~48 ns），miss=0 |
+| 硬件 JPEG 压缩 | 1920×1088 灰度，95.9%~96.3%，~4.5 fps（2026-10-29） |
 
-完整表格与证据见 [docs/BOARD_TEST.md](docs/BOARD_TEST.md)；
-六项交付项的状态与量化数据见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
+完整表格与证据见 [docs/BOARD_TEST.md](docs/BOARD_TEST.md)；六项交付状态见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
+文档入口：[DATAFLOW](docs/DATAFLOW.md)（链路/寄存器）、[CODEC](docs/CODEC.md)（JPEG 压缩）、
+[RKNN](docs/RKNN.md)（NPU 部署）、[HARDWARE_SYNC](docs/HARDWARE_SYNC.md)（双路同步）。
 
 ## 已知边界
 
-- 4K 全帧、4K+同步、MSI 中断、故障注入都没有板测数据。
+- 4K 全帧已单路验证；双路 4K、4K+同步、MSI 中断、故障注入都没有板测数据。
+- 压缩支路 ~4.5 fps，非实时；只支持 1920×1088 灰度。
 - R10F 的 `sof_timestamp/timestamp_hz` 仍为 0；`bayer_phase` 是 RTL 占位推导，不是测量值。
 - `0x1E8` 是 SOF/包层数字配对差，不是曝光相位差。
 - 位流是 SRAM 配置：重下/掉电后必须重启 RK3588。
