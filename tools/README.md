@@ -11,7 +11,9 @@ FPGA JPEG 压缩链路的全部工具：主机侧负责参考编码/封装/校�
 | `board/jpeg_cap.py` | 板端 | 两段式取流库 + CLI：`bar_read/bar_write/link_ctl/frame_wait`、`capture_entropy(fd)`、`capture_stream(path)` |
 | `board/fpga_jpeg_npu.py` | 板端 | import 上面两个模块：压缩 -> PCIe -> 解码 -> RKNN YOLO11n -> 画框 |
 | `board/stab_compress.py` | 板端 | 压缩支路长稳采样；独立脚本，只依赖 `/root/pci_bar` |
-| `board/demo.sh` | 主机 | 探测板端、scp 依赖到 `/tmp`、执行 env/cap/npu/stab/all |
+| `board/demo.sh` | 主机 | 探测板端、scp 依赖到 `/tmp`、执行 env/cap/gain/npu/stab/all |
+| `board/algo_sweep.sh` | 板端 | 四路预处理（灰度/高斯/HE/Sobel）各取一帧并算统计量 |
+| `board/latency_probe.sh` | 板端 | 连续 arm/ack 取帧，打印 R10F 时间戳口径的端到端延迟 |
 | `selftest.py` | 主机 | 纯本地自检：fake BAR/mmap、JPEG 头 golden hash、编解码回环 |
 
 ## 本地自检
@@ -35,6 +37,7 @@ PYTHONPATH=/usr/lib/python3/dist-packages python3.12 tools/selftest.py
 ```sh
 tools/board/demo.sh env     # PCIe/驱动/温度/设备节点
 tools/board/demo.sh cap     # 只读取一帧到 /tmp/demo_cap.pgm
+tools/board/demo.sh gain    # 传感器增益扫描（0x280），末尾写回适合白天的 0x30
 tools/board/demo.sh npu     # FPGA JPEG -> RKNN，标注图 /tmp/demo_npu.jpg
 tools/board/demo.sh stab    # 压缩长稳 20 s，日志 /tmp/stab_compress.log
 tools/board/demo.sh all
