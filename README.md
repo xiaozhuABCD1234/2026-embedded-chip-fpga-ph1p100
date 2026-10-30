@@ -101,14 +101,15 @@ ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
 | 硬件 JPEG | 95.5%，65.7 ms/帧，7.5~8.5 fps（亮场）；1 h 26,965 帧 |
 | RKNN YOLO11n | 40~45 ms/帧；双路 960×544 21.9 pair/s |
 | 压缩→NPU 全链路 | 464~486 ms/帧 |
-| 资源（JPEG 位流） | LUT6 28,025（39.1%），WNS +0.026 ns |
+| 运行时曝光 | BAR0 `0x280` 写增益码（0.3 dB/LSB），0/19.2/30 dB 三档实测生效 |
+| 资源（JPEG 位流） | LUT6 27,964（39.0%）、ERAM 160、DSP 38，Setup +0.101 ns |
 
 证据与判据见 [TEST_REPORT](docs/TEST_REPORT.md)，历史专项记录在
 [docs/evidence](docs/evidence/)（fps/pair/sync/color/detect）。
 
 ## 已知边界
 
-- 压缩支路 7.5~8.5 fps（亮场）、暗场 ~4 fps，不是实时；只处理 1920×1088 灰度（线上 packed RAW10）。
+- 压缩支路 6.4~8.5 fps（随曝光/场景），不是实时；只处理 1920×1088 灰度（线上 packed RAW10）。
 - 4K 与 JPEG 是两个独立位流；4K+JPEG、双路 4K、4K+硬件同步未做。
 - 端到端 ≤50 ms 未闭合：压缩帧从 SOF 到主机约 118 ms，瓶颈是 65.7 ms 编码。
 - 整机功耗未测（板上无电流传感器），需 USB-C PD 表或台式电源。
