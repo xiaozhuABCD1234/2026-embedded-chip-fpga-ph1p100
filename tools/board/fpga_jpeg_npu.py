@@ -1,32 +1,19 @@
 #!/usr/bin/env python3
 """fpga_jpeg_npu.py —— FPGA JPEG -> PCIe -> RK3588 解码 -> RKNN YOLO11n 全链路演示。
 
-板端运行（Orange Pi 5 Max / RK3588）：
-  python3 tools/board/fpga_jpeg_npu.py --frames 3 --show-detections
+板端运行（Orange Pi 5 Max / RK3588；需与 jpeg_cap.py / jpeg_file.py /
+jpeg_ref.py 放同一目录，demo.sh 负责一起 scp 到 /tmp）：
+  python3 /tmp/fpga_jpeg_npu.py --frames 3 --show-detections
 
-链路分段：
-  1. FPGA 硬压缩：ALGO_CTRL=0x10，轮询 0x258[31:16]（jb_done）等压缩完成；
-  2. PCIe 取流：ALGO_CTRL=0x40，ARM 一帧，等 FRAME_WAIT，读 0x250 长度，
-     从槽 0 的 +128 处拷出纯熵流（与 /root/jpeg_cap.py 的做法一致）；
-  3. 补 328 字节标准 JFIF 头 + EOI，用 PIL 解码成灰度图；
-  4. 灰度复制成 RGB，按 display/src/detect/yolo.rs 的 letterbox/解码/NMS 契约
-     做 RKNN 推理（默认模型与 display 相同）；
-  5. PIL 画框，存图，打印各阶段耗时与检测结果。
-
-注意：FPGA 输出的是 **纯熵编码比特流**，不含 SOI/DQT/SOF0/DHT/SOS/EOI，
-所以必须用下面的常量头包装；头由 tools/jpeg_file.py 的
-build_header(1920, 1088)（q=50 亮度表 + 标准 Annex K 哈夫曼表）生成。
+链路：jpeg_cap.capture_stream() 两段式取流 -> jpeg_file.build_jpeg() 补标准
+JFIF 头 -> PIL 解码 -> letterbox/RKNN/NMS（对齐 display/src/detect/yolo.rs）
+-> 画框存图。FPGA 只输出纯熵流，不含 SOI/DQT/SOF0/DHT/SOS/EOI。
 """
 from __future__ import annotations
 
 import argparse
-import fcntl
 import io
-import mmap
 import os
-import re
-import struct
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -34,35 +21,31 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# ---- 板端设备与寄存器约定（与 /root/jpeg_cap.py 相同）----
-FRAME_DEV = '/dev/ANLOGIC-PCI0_frame'
-PCI_BAR = '/root/pci_bar'
-LINK_CTL = '/root/link_ctl'
-# _IOWR('x', 11, struct anlogic_ioc_frame_wait)，6 个 u32
-IOC_FRAME_WAIT = 0xC018780B
-ALGO_CTRL = 0x240
-ALGO_COMPRESS = 0x10
-ALGO_PUSH_COMP = 0x40
-REG_STREAM_LEN = 0x250
-REG_JB_STATUS = 0x258
-HDR_OFF = 128                 # 槽 0 内数据起点
+# 仓库内：jpeg_cap 在 tools/board/，jpeg_file/jpeg_ref 在 tools/；
+# 板端：四个脚本都在 /tmp。两种布局都把所在目录塞进 sys.path。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PARENT = os.path.dirname(_HERE)
+for _p in (_HERE, _PARENT):
+    if _p in sys.path:
+        continue
+    # 只把确实含依赖脚本的目录放进 sys.path（板端 /tmp 的父目录是 /，不能乱加）。
+    if any(os.path.exists(os.path.join(_p, name))
+           for name in ('jpeg_cap.py', 'jpeg_file.py')):
+        sys.path.insert(0, _p)
+
+from jpeg_cap import (  # noqa: E402
+    ALGO_CTRL,
+    bar_write,
+    capture_stream,
+    link_ctl,
+)
+from jpeg_file import build_jpeg  # noqa: E402
+
 FRAME_W = 1920
 FRAME_H = 1088
 PAD_VALUE = 114               # letterbox 灰边，与 yolo.rs 一致
 NUM_CLASSES = 80
 MAX_DETECTIONS = 100
-
-# build_header(1920, 1088)：SOI + APP0/JFIF + DQT(q50) + SOF0 + DHT(DC) +
-# DHT(AC) + SOS，共 328 字节。不要手改，尺寸必须与 FPGA 几何一致。
-JPEG_HEADER = bytes.fromhex(
-    "ffd8ffe000104a46494600010100000100010000ffdb004300100b0c0e0c0a100e0d0e1211101318281a181616183123"
-    "251d283a333d3c3933383740485c4e404457453738506d51575f626768673e4d71797064785c656763ffc0000b080440"
-    "078001011100ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b51000020103"
-    "03020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f024336272"
-    "82090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475"
-    "767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9"
-    "cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffda0008010100003f00"
-)
 
 COCO_NAMES = (
     'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train',
@@ -84,34 +67,6 @@ COCO_NAMES = (
 def _round_half_up(v: float) -> int:
     """Rust f32::round() 对正数等价于 floor(v + 0.5)。"""
     return int(np.floor(v + 0.5))
-
-
-def bar_read(off: int) -> int:
-    out = subprocess.run([PCI_BAR, '0', hex(off)], check=True,
-                         capture_output=True, text=True).stdout
-    m = re.search(r'Read data:\s*(0x[0-9a-fA-F]+)', out)
-    if not m:
-        raise RuntimeError(f'pci_bar 输出无法解析：{out!r}')
-    return int(m.group(1), 0)
-
-
-def bar_write(off: int, val: int) -> None:
-    subprocess.run([PCI_BAR, '0', hex(off), hex(val)], check=True,
-                   capture_output=True, text=True)
-
-
-def link_ctl(action: str) -> int:
-    """返回 link_ctl 退出码；ack/arm 失败由调用方决定是否致命。"""
-    return subprocess.run([LINK_CTL, action], capture_output=True,
-                          text=True).returncode
-
-
-def frame_wait(fd: int, last_seq: int, timeout_ms: int):
-    """等一帧 DMA；返回 (seq, count, ready, slot)。"""
-    buf = struct.pack('<6I', last_seq, timeout_ms, 0, 0, 0, 0)
-    raw = fcntl.ioctl(fd, IOC_FRAME_WAIT, buf)
-    _ls, _to, seq, count, ready, slot = struct.unpack('<6I', raw)
-    return seq, count, ready, slot
 
 
 # ---- letterbox / 后处理：逐项对齐 display/src/detect/yolo.rs ----
@@ -316,61 +271,6 @@ class Detector:
         return dets, top, (t1 - t0) * 1000.0, (t2 - t1) * 1000.0, (t3 - t2) * 1000.0
 
 
-def capture_frame(fd: int, timeout_ms: int, compress_timeout: float):
-    """压缩一帧并取回纯熵流；返回 (entropy, compress_wait_ms, pcie_read_ms)。"""
-    bar_write(ALGO_CTRL, 0)
-    done0 = (bar_read(REG_JB_STATUS) >> 16) & 0xFFFF
-    t0 = time.perf_counter()
-    bar_write(ALGO_CTRL, ALGO_COMPRESS)
-    while True:
-        if ((bar_read(REG_JB_STATUS) >> 16) & 0xFFFF) != done0:
-            break
-        if time.perf_counter() - t0 > compress_timeout:
-            raise TimeoutError(f'等压缩超时（{compress_timeout}s，jb_done 未变化）')
-        time.sleep(0.03)
-    # writer 还要把尾部补齐字节写完，和 jpeg_cap.py 一样留 50ms 余量。
-    time.sleep(0.05)
-    compress_ms = (time.perf_counter() - t0) * 1000.0
-
-    # 0x250 必须在切到推流（0x40）之前读：切过去后该寄存器可能被清 0，
-    # jpeg_cap.py 也是先快照长度、再 ARM。这里把这次 BAR 读计入 PCIe 阶段。
-    t_len = time.perf_counter()
-    n = bar_read(REG_STREAM_LEN)
-    bar_ms = (time.perf_counter() - t_len) * 1000.0
-    if n <= 0:
-        raise RuntimeError(f'码流长度非法：0x250={n}（压缩阶段没有产出）')
-
-    bar_write(ALGO_CTRL, ALGO_PUSH_COMP)
-    try:
-        seq0, _, _, _ = frame_wait(fd, 0, 0)
-        frame = None
-        for attempt in range(3):
-            rc = link_ctl('arm')
-            if rc == 0:
-                break
-            # 推帧已在飞时 ARM 常返回 EIO；先看这一帧是否已落地，落地就不等。
-            print(f'  ARM 第 {attempt + 1} 次失败（推帧在飞）', file=sys.stderr)
-            got = frame_wait(fd, seq0, 0)
-            if got[2]:
-                frame = got
-                break
-            time.sleep(0.1)
-        seq, count, ready, slot = frame if frame else frame_wait(fd, seq0, timeout_ms)
-        if not ready:
-            raise TimeoutError(f'等新帧超时：seq={seq} count={count}')
-        t_copy = time.perf_counter()
-        size = ((HDR_OFF + n + 4095) // 4096) * 4096
-        with mmap.mmap(fd, size, prot=mmap.PROT_READ,
-                       flags=mmap.MAP_SHARED) as m:
-            data = bytes(m[HDR_OFF:HDR_OFF + n])
-        pcie_ms = bar_ms + (time.perf_counter() - t_copy) * 1000.0
-    finally:
-        # 每帧收尾：压缩/推流源归零并释放 HELD，保证下一轮从干净状态开始。
-        bar_write(ALGO_CTRL, 0)
-        link_ctl('ack')
-    return data, compress_ms, pcie_ms
-
-
 def draw_and_save(gray: np.ndarray, dets, out: str) -> None:
     img = Image.fromarray(gray, mode='L').convert('RGB')
     d = ImageDraw.Draw(img)
@@ -417,26 +317,28 @@ def main() -> int:
         print('--conf/--iou 必须在 0..1', file=sys.stderr)
         return 2
 
-    if len(JPEG_HEADER) != 328:
-        print(f'内置 JPEG 头长度 {len(JPEG_HEADER)} != 328，脚本损坏', file=sys.stderr)
-        return 2
-
-    fd = None
     det = None
     try:
         det = Detector(args.model)
         print(f'模型：{args.model}')
-        fd = os.open(FRAME_DEV, os.O_RDONLY)
         bar_write(ALGO_CTRL, 0)
         link_ctl('ack')
 
         recs = []
         for fi in range(args.frames):
             t_frame = time.perf_counter()
-            entropy, cms, pms = capture_frame(
-                fd, args.timeout_ms, args.compress_timeout)
+            cap = capture_stream(
+                force_compress=True,
+                cleanup=True,
+                timeout_ms=args.timeout_ms,
+                compress_timeout=args.compress_timeout,
+                arm_retry_delay=0.1,      # 与原 capture_frame 的 100 ms 重试一致
+                on_arm_fail=lambda attempt, _detail: print(
+                    f'  ARM 第 {attempt} 次失败（推帧在飞）', file=sys.stderr),
+            )
+            entropy, cms, pms = cap.data, cap.compress_ms, cap.pcie_ms
             t_dec = time.perf_counter()
-            jpeg = JPEG_HEADER + entropy + b'\xff\xd9'
+            jpeg = build_jpeg(entropy, width=FRAME_W, height=FRAME_H)
             try:
                 with Image.open(io.BytesIO(jpeg)) as im:
                     im.load()
@@ -498,8 +400,6 @@ def main() -> int:
             pass
         if det is not None:
             det.close()
-        if fd is not None:
-            os.close(fd)
 
 
 if __name__ == '__main__':

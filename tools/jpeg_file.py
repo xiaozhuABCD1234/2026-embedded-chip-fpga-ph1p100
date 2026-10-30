@@ -11,6 +11,7 @@ DC/AC 规范哈夫曼 + 0xFF 后补 0x00，不含 SOI/DQT/SOF0/DHT/SOS/EOI。本
   python3 tools/jpeg_file.py check <out.jpg> [<ref.png>] [--threshold 30]
 
 wrap 只做「常量头 + 熵流 + EOI」，不重新编码、不改动熵流一个字节。
+build_header()/build_jpeg() 可被板端脚本 import（默认 1920x1088，可传任意尺寸）。
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ import numpy as np
 # 允许从仓库根目录或任意 CWD 直接运行：把 tools/ 放进 sys.path 以复用参考实现。
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from jpeg_ref import (  # noqa: E402
-    AC_BITS, AC_VALS, DC_BITS, DC_VALS, LUMA_Q, ZZ, scale_q,
+    AC_BITS, AC_VALS, DC_BITS, DC_VALS, LUMA_Q, ZZ,
 )
 
 # q=50 标准亮度量化表（自然光栅顺序，8x8），与 jpeg_quant_zz.v 的 qtab 一致。
@@ -202,7 +203,8 @@ def check_jpeg(path: str, ref_path: str | None = None,
     """
     from PIL import Image
 
-    data = open(path, 'rb').read()
+    with open(path, 'rb') as f:
+        data = f.read()
     if not data:
         raise ValueError('JPEG 文件为空')
     names, header_end = check_header(data)
@@ -273,7 +275,8 @@ def _fmt_psnr(p):
 
 
 def _cmd_wrap(args) -> int:
-    entropy = open(args.entropy, 'rb').read()
+    with open(args.entropy, 'rb') as f:
+        entropy = f.read()
     jpg = build_jpeg(entropy, width=args.width, height=args.height)
     with open(args.out, 'wb') as f:
         f.write(jpg)

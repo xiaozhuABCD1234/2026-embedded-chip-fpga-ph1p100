@@ -2,14 +2,14 @@
 """JPEG 基线（8x8 DCT + 量化 + DC 差分 + AC 之字形 RLE + 规范哈夫曼）参考实现。
 
 用途：验证「硬件 JPEG 编码器」能拿到多少压缩率/画质，给 RTL 设计定参数。
-只用灰度（Y），输出标准 JPEG 码流，可用任何图片查看器打开验证。
+只用灰度（Y）；encode_entropy() 输出纯熵流，交给 jpeg_file.build_jpeg() 才是
+标准 JPEG 文件。
 
-用法：
-  python3 tools/jpeg_ref.py frame.pgm [quality] [out.jpg]
+用法：python3 tools/jpeg_ref.py frame.pgm   # 打印 q=30..90 的字节数/压缩率/PSNR
 """
 import sys
+
 import numpy as np
-from PIL import Image
 
 ZZ = np.array([
      0,  1,  8, 16,  9,  2,  3, 10,
@@ -134,6 +134,20 @@ def cost_of(dct_blocks, q):
     return (bits + 7) // 8
 
 
+def _prepare(img):
+    """校验单通道、补边到 8 的倍数并减 128，返回 (pad, H, W, ph, pw)。"""
+    img = np.asarray(img, dtype=np.float64)
+    if img.ndim != 2:
+        raise ValueError('只接受单通道灰度图')
+    H, W = img.shape
+    ph = (H + 7) // 8 * 8
+    pw = (W + 7) // 8 * 8
+    pad = np.full((ph, pw), 128.0, np.float64)
+    pad[:H, :W] = img
+    pad -= 128.0
+    return pad, H, W, ph, pw
+
+
 def encode_entropy(img, quality=50):
     """对整帧灰度图做完整 JPEG 编码，返回**纯熵编码字节流**（无任何标记段）。
 
@@ -141,16 +155,7 @@ def encode_entropy(img, quality=50):
     0xFF 后补 0x00；只在帧末补 1 到字节边界。可直接交给
     tools/jpeg_file.py 的 build_jpeg() 包成标准 .jpg。
     """
-    img = np.asarray(img, dtype=np.float64)
-    if img.ndim != 2:
-        raise ValueError('encode_entropy 只接受单通道灰度图')
-    H, W = img.shape
-    ph = (H + 7) // 8 * 8
-    pw = (W + 7) // 8 * 8
-    pad = np.full((ph, pw), 128.0, np.float64)
-    pad[:H, :W] = img
-    pad -= 128.0
-
+    pad, _, _, ph, pw = _prepare(img)
     q = scale_q(LUMA_Q, quality)
     w = BitWriter()
     prev_dc = 0
@@ -193,14 +198,9 @@ def encode_entropy(img, quality=50):
     return bytes(w.out)
 
 
-def run(img, quality, path=None):
-    H, W = img.shape
-    ph = (H + 7) // 8 * 8
-    pw = (W + 7) // 8 * 8
-    pad = np.full((ph, pw), 128, np.float64)
-    pad[:H, :W] = img
-    pad -= 128.0
-
+def run(img, quality):
+    """返回 (熵编码字节数, PSNR)；量化表放不下时返回 (None, None)。"""
+    pad, H, W, ph, pw = _prepare(img)
     blocks = []
     for by in range(0, ph, 8):
         for bx in range(0, pw, 8):
@@ -222,7 +222,7 @@ def run(img, quality, path=None):
             idx += 1
             rec[by:by+8, bx:bx+8] = idct8(z)
     rec = np.clip(rec + 128, 0, 255)[:H, :W]
-    mse = np.mean((img.astype(np.float64) - rec) ** 2)
+    mse = np.mean((np.asarray(img, dtype=np.float64) - rec) ** 2)
     psnr = 99.0 if mse < 1e-9 else 10 * np.log10(255.0**2 / mse)
     return nbytes, psnr
 
@@ -251,6 +251,8 @@ def idct8(F):
 def main():
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
+    from PIL import Image     # 只有命令行主流程需要 PIL
+
     img = np.asarray(Image.open(sys.argv[1]).convert('L')).astype(np.float64)
     print('帧 %dx%d' % (img.shape[1], img.shape[0]))
     print()

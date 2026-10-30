@@ -7,7 +7,7 @@
 - RK3588 NPU 上跑 YOLO11n 640 INT8；双路各一个 context，A=core0、B=core1。
 - 检测在 postprocessed RGB 上做，letterbox 到 640×640 NHWC，结果按归一化坐标叠加到当前输出尺寸，所以 `--scale` 改尺寸不影响框位置。
 - 检测 worker 与 JPEG 编码解耦，mailbox 只保留最新任务；结果超过 500 ms 不画。
-- 板测（960×544 双路）：21.9 pair/s，单路推理约 40 ms，A 6 框 / B 7 框。
+- 板测（960×544 双路）：21.9 pair/s，单路推理 40~45 ms/帧（离线单帧 50.8 ms），A 6 框 / B 7 框。
 
 ## 2. 模型契约
 
@@ -90,7 +90,8 @@ flowchart TB
 
 ## 8. 证据
 
-`log/detect/RESULTS.md`，图 `log/detect/live_a.jpg`、`live_b.jpg`、`offline_int8.jpg`。
+[evidence/detect.md](evidence/detect.md)；图 [detect_live_a.jpg](evidence/detect_live_a.jpg)、
+[detect_live_b.jpg](evidence/detect_live_b.jpg)、[detect_offline.jpg](evidence/detect_offline.jpg)。
 
 复跑（离线，不影响设备占用）：
 

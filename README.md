@@ -1,16 +1,29 @@
 # PH1P100 × RK3588 —— 4K 采集 / 硬件 JPEG / PCIe / NPU 全链路
 
 安路 PH1P100SBG484 做 PCIe Gen2 ×2 端点：一条 4K30 全帧 RAW10 直传通路，
-一条 1080p ROI 灰度的**硬件 JPEG 压缩**通路（约 95% 压缩率），压缩流经 PCIe
+一条 1080p ROI 灰度的**硬件 JPEG 压缩**通路（典型压缩率 95.5%），压缩流经 PCIe
 回传后由 RK3588 解码、RKNN 检测并叠加。RK3588 驱动提供字符节点供取帧/推流。
 
 | 目录 | 仓库 | 职责 |
 |---|---|---|
-| `fpga/` | [`ph1p100-pcie-ep-fpga`](https://github.com/xiaozhuABCD1234/ph1p100-pcie-ep-fpga) | MIPI CSI-2 接收、R10F 写者、DDR3、JPEG 压缩、one-shot 推帧、BAR0/RKA1 |
-| `driver/` | [`ph1p100-pcie-ep-driver`](https://github.com/xiaozhuABCD1234/ph1p100-pcie-ep-driver) | RK3588 内核模块、一致性收帧缓冲、ioctl 与 Rust 工具 |
-| `display/` | [`ph1p100-pcie-ep-display`](https://github.com/xiaozhuABCD1234/ph1p100-pcie-ep-display) | MJPEG/快照 HTTP、R10F 解析、Bayer/后处理、RKNN 叠加 |
+| `fpga/` | `ph1p100-pcie-ep-fpga` | MIPI CSI-2、R10F 写者、DDR3、JPEG、one-shot 推帧、BAR0/RKA1 |
+| `driver/` | `ph1p100-pcie-ep-driver` | RK3588 内核模块、一致性收帧缓冲、ioctl 与 Rust 工具 |
+| `display/` | `ph1p100-pcie-ep-display` | MJPEG/快照 HTTP、R10F 解析、Bayer/后处理、RKNN 叠加 |
 
-主仓：[`2026-embedded-chip-fpga-ph1p100`](https://github.com/xiaozhuABCD1234/2026-embedded-chip-fpga-ph1p100)。
+## 交付状态（对照赛题六项）
+
+| # | 要求 | 状态 | 关键数据 |
+|---|---|---|---|
+| 1 | MIPI CSI，≥1080p60 / 鼓励 4K30 | 4K30 达成 | 3840×2160@29.9 fps，丢组 0 |
+| 2 | ≥3 种预处理，AXI-Stream 流水线 | 达成（类 AXI-Stream） | 灰度/高斯/HE，1920×1088@30 fps |
+| 3 | 硬件 JPEG，压缩率 ≥30% | 达成，非实时 | 95.5%（分母为 8 bit 灰度），65.7 ms/帧，7.5~8.5 fps |
+| 4 | PCIe 传压缩帧，端到端 ≤50 ms | 传输段达成，端到端未闭合 | 传输 <1 ms；SOF→主机 ≈118 ms |
+| 5 | RKNN 推理 + 回显/叠加 | 达成 | YOLO11n INT8，40~45 ms/帧 |
+| 6 | 完整量化报告 | 五项有数，功耗未测 | 见 [测试报告](docs/TEST_REPORT.md) |
+
+严格口径见 [TEST_REPORT](docs/TEST_REPORT.md) §2，缺口与下一步见
+[REQUIREMENTS](docs/REQUIREMENTS.md) §5。
+本项目不把“传输段 <50 ms”写成“端到端 <50 ms”，也不把 4K30 写成 1080p60。
 
 ## 数据通路
 
@@ -29,82 +42,90 @@ flowchart LR
   DEV --> NPU["解码 + RKNN 叠加"]
 ~~~
 
-细节（寄存器、缓冲布局、诊断位域）见 [docs/DATAFLOW.md](docs/DATAFLOW.md)。
+寄存器、帧契约与同步细节见 [ARCHITECTURE](docs/ARCHITECTURE.md)；JPEG 码流见
+[CODEC](docs/CODEC.md)。
 
 ## 帧契约
 
-| 量 | 值 |
-|---|---:|
-| 图像 | 3840×2160 packed RAW10，stride 4800 B |
-| payload | 10,368,000 B |
-| 整帧 | 128 B 头 + payload + 2,944 B 尾零 = **10,371,072 B**（2532 × 4 KiB） |
-| 每帧 MWr | 81,024 笔 128 B + 1 笔门铃 |
-| DDR 双缓冲 | A0=0x0100_0000、A1=0x0200_0000（B0/B1=0x0300_0000/0x0400_0000） |
+| 量 | 4K 采集位流 | 1920×1088 位流（ROI/JPEG） |
+|---|---:|---:|
+| 图像 | 3840×2160 packed RAW10 | 1920×1088 packed RAW10（算法侧解包成 8 bit 灰度） |
+| stride | 4,800 B | 2,400 B |
+| payload | 10,368,000 B | 2,611,200 B（解包后 8 bit 为 2,088,960 B） |
+| 整帧 | **10,371,072 B**（2,532×4 KiB） | **2,613,248 B**（638×4 KiB） |
+| DDR 双缓冲 | A0/A1=0x0100_0000/0x0200_0000 | 同左 |
 
-（上表是 **4K 采集位流**的契约；JPEG 位流的 1920×1088 灰度/压缩块契约见
-[CODEC](docs/CODEC.md)。）
+早期 1080p ROI 位流（1920×1080、slot 2,592,768 B）的数字只出现在
+[evidence/pair.md](docs/evidence/pair.md)、[evidence/fps.md](docs/evidence/fps.md)，不要与上表混用。
+位流是 SRAM 配置：重下/掉电后必须重启 RK3588 才会重新枚举 Gen2 ×2。
 
 ## 快速开始（板子）
 
 ~~~sh
-# 1) 下载 SRAM 位流（本地 TD；板卡随后必须重启才能重新枚举 Gen2 ×2）
+# 1) 下载 SRAM 位流（本机 TD）
 cd fpga
 /opt/anlogic/TD_Release_2026.2_NL/bin/bw.sh download_sram.tcl
 ssh root@<BOARD> 'sync; reboot'
 
-# 2) 驱动：当前 JPEG 位流是 1920×1088；4K 采集位流改 frame_width=3840 frame_height=2160
+# 2) 驱动：按位流几何加载（当前 JPEG 位流 1920×1088）
 ssh root@<BOARD> 'insmod /root/anlogic_pci.ko frame_width=1920 frame_height=1088 frame_slots=1'
 ssh root@<BOARD> 'ls /dev/ANLOGIC-PCI0_{user,control,frame}'
 
-# 3) 取一帧（离线 PGM）
-ssh root@<BOARD> '/root/frame_grab -t 3000 -o /dev/shm/a.pgm'
+# 3) 一键自检（本机执行）
+tools/board/demo.sh env     # 链路/驱动/温度/设备节点
+tools/board/demo.sh cap     # 取一帧
+tools/board/demo.sh npu     # 压缩→PCIe→解码→RKNN→画框
+tools/board/demo.sh stab    # 20 s 压缩稳定性
 
-# 4) 实时页
+# 4) 曝光：写 0x280 调传感器模拟增益（每 LSB 0.3 dB）
+ssh root@<BOARD> '/root/pci_bar 0 0x280 0x10'   # 0x10=4.8 dB 亮场，0x40=19.2 dB 暗场
+ssh root@<BOARD> '/root/pci_bar 0 0x284'        # 回读 {done_b, done_a, ae_st, gain}
+
+# 5) 实时页
 ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
 # 浏览器打开 http://<BOARD>:8091/
-
-# 5) 压缩→PCIe→RKNN 全链路（约 8 fps，输出 /tmp/fpga_npu.jpg）
-scp tools/board/fpga_jpeg_npu.py root@<BOARD>:/tmp/
-ssh root@<BOARD> 'python3 /tmp/fpga_jpeg_npu.py --frames 3 --show-detections'
 ~~~
 
-双路（1080p ROI 时代的能力，仍可用）：先 `link_ctl sync start -t 5000`，再 `frame_grab --pair` 或
-`display-pair --source device-pair`；见 [docs/HARDWARE_SYNC.md](docs/HARDWARE_SYNC.md)。
+双路（1080p ROI）：先 `link_ctl sync start -t 5000`，再 `frame_grab --pair` 或
+`display-pair --source device-pair`。驱动与工具构建见 [driver/README](driver/README.md)；
+显示/NPU 见 [display/README](display/README.md)。
 
-驱动与板端工具（`pci_bar`/`link_ctl`/`frame_grab`）的构建部署见 [driver/README.md](driver/README.md)；
-显示与 NPU 推流见 [display/README.md](display/README.md)。
-
-## 实测（2026-10-28/29）
+## 实测（2026-10-28~30）
 
 | 项 | 结果 |
 |---|---|
-| 4K30 单路采集 | 3840×2160@29.9 fps，丢组 0（2026-10-29） |
-| 双路自由采集 | A/B 各 29.993 fps，丢组 0（1080p ROI） |
-| 纯取帧 | 30.4 pair/s（60 帧/s，PCIe ~155 MB/s） |
+| 4K30 单路采集 | 3840×2160@29.9 fps，丢组 0 |
+| 双路 1080p 自由采集 | A/B 各 29.997 fps，丢组 0 |
 | 双路 pair 取帧 | 600/600 成功（180 s），A/B `capture_seq` 全相同 |
-| display 1080p / 540p | 11 pair/s / 23 pair/s |
-| RKNN YOLO11n（960×544） | 21.9 pair/s，单路推理约 40 ms |
-| 硬件同步 | A 主/B 从，`0x1E4=0x8000D`，skew 2~3 tick（约 32~48 ns），miss=0 |
-| 硬件 JPEG 压缩 | 1920×1088 灰度，95.5%，7.5~8.5 fps（1 h 长稳 26,965 帧） |
-| 压缩→RKNN 全链路 | 解码 18 ms + 推理 45 ms，4~10 个目标（随场景），标注图入库 |
+| 帧传输段带宽 | 4K RAW ≈519 MB/s（≈20 ms/帧） |
+| 硬件 JPEG | 95.5%，65.7 ms/帧，7.5~8.5 fps（亮场）；1 h 26,965 帧 |
+| RKNN YOLO11n | 40~45 ms/帧；双路 960×544 21.9 pair/s |
+| 压缩→NPU 全链路 | 464~486 ms/帧 |
+| 资源（JPEG 位流） | LUT6 28,025（39.1%），WNS +0.026 ns |
 
-完整表格与证据见 [docs/BOARD_TEST.md](docs/BOARD_TEST.md)；六项交付状态见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
-文档入口：[DATAFLOW](docs/DATAFLOW.md)（链路/寄存器）、[CODEC](docs/CODEC.md)（JPEG 压缩）、
-[RKNN](docs/RKNN.md)（NPU 部署）、[HARDWARE_SYNC](docs/HARDWARE_SYNC.md)（双路同步）。
+证据与判据见 [TEST_REPORT](docs/TEST_REPORT.md)，历史专项记录在
+[docs/evidence](docs/evidence/)（fps/pair/sync/color/detect）。
 
 ## 已知边界
 
-- 4K30 全帧在 4K 采集位流上验证（`fpga` 提交 `27bcd9ff`）；当前 JPEG 位流走 1080p ROI。
-- 双路 4K、4K+同步、MSI 中断、故障注入都没有板测数据。
-- 压缩支路 7.5~8.5 fps，非实时；1 h 长稳 26,965 帧通过，编码器 65.7 ms/帧。
-- 压缩→NPU 全链路已打通（`tools/board/fpga_jpeg_npu.py`），但受压缩帧率限制，~2 fps 端到端。
-- R10F 的 `sof_timestamp/timestamp_hz` 仍为 0；`bayer_phase` 是 RTL 占位推导，不是测量值。
-- `0x1E8` 是 SOF/包层数字配对差，不是曝光相位差。
-- 位流是 SRAM 配置：重下/掉电后必须重启 RK3588。
-- 根 `log/` 是本地证据（gitignore），只放每专题一份 RESULTS 与少量图。
+- 压缩支路 7.5~8.5 fps（亮场）、暗场 ~4 fps，不是实时；只处理 1920×1088 灰度（线上 packed RAW10）。
+- 4K 与 JPEG 是两个独立位流；4K+JPEG、双路 4K、4K+硬件同步未做。
+- 端到端 ≤50 ms 未闭合：压缩帧从 SOF 到主机约 118 ms，瓶颈是 65.7 ms 编码。
+- 整机功耗未测（板上无电流传感器），需 USB-C PD 表或台式电源。
+- 双路 1080p 有硬件同步记录；4K 下 B 路 slave 收不到可用 SOF，需查板级 XVS/XHS。
+- 位流 SRAM 配置；重下/掉电后必须重启 RK3588。
+
+## 文档
+
+- [ARCHITECTURE](docs/ARCHITECTURE.md)：拓扑、帧契约、寄存器、双路同步
+- [TEST_REPORT](docs/TEST_REPORT.md)：六项交付状态、实测数据、缺口
+- [REQUIREMENTS](docs/REQUIREMENTS.md)：赛题逐条对照、评分点与优先级
+- [CODEC](docs/CODEC.md)：JPEG 码流契约、RTL 模块、主机流程
+- [RKNN](docs/RKNN.md)：模型契约、双输出量化、线程模型
+- [docs/evidence](docs/evidence/)：专项板测记录与图
 
 ## 硬件与工具链
 
 - FPGA：PH1P100SBG484，TD `Release_2026.2_NL`（无头：`td.sh build.tcl`）
-- 主机：Orange Pi 5 Max / RK3588，内核 `7.2.0-dirty`（aarch64，NFS root）
-- 相机：FEP-VID006-MIPI 子卡（IMX415 ×2，CAM005 模组），27 MHz / 891 Mbps ×4 lane
+- 主机：Orange Pi 5 Max / RK3588，内核 7.2.0（aarch64，NFS root）
+- 相机：FEP-VID006-MIPI 子卡（IMX415 ×2），27 MHz / 891 Mbps ×4 lane
