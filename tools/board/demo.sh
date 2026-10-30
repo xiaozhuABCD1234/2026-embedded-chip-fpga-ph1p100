@@ -1,6 +1,8 @@
 #!/bin/sh
-# demo.sh —— PH1P100 + RK3588 板端一键演示
-# 本机执行；自动把依赖脚本 scp 到板端 /tmp，再通过 ssh 运行。
+# demo.sh —— PH1P100 + RK3588 板端一键验证 / 演示
+#
+# 本机执行：先 SSH 探测板端，按需把依赖脚本 scp 到 /tmp，再在板端跑对应子命令。
+# 所有子命令共用同一套 "$(arm/ack + frame_grab)" 取帧惯用法，不再各自复制一份。
 set -eu
 
 BOARD=${BOARD:-192.168.1.101}
@@ -17,6 +19,27 @@ STAB_SCRIPT=$SCRIPT_DIR/stab_compress.py
 # npu 链路在板端 import 这些模块，必须一起同步到 /tmp
 NPU_DEPS="$SCRIPT_DIR/jpeg_cap.py $TOOLS_DIR/jpeg_file.py $TOOLS_DIR/jpeg_ref.py"
 
+# 板端公共前缀：取一帧并算均值/最大值/尺寸。各子命令复用，避免同一段脚本抄三份。
+REMOTE_PRELUDE='
+set -eu
+PCI=/root/pci_bar
+grab() {                       # grab <输出名>：arm/ack 后取一帧，打印统计
+    /root/link_ctl ack >/dev/null 2>&1 || true
+    /root/link_ctl arm >/dev/null 2>&1 || true
+    sleep 0.9
+    /root/frame_grab -t 5000 -o "/tmp/$1.pgm" >/dev/null 2>&1 || { echo "  取帧失败"; return 0; }
+    python3 - "/tmp/$1.pgm" "$2" <<PY
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("L")
+h = im.histogram(); n = sum(h)
+print("  %-22s 均值 %6.1f  最大 %3d" % (sys.argv[2],
+      sum(i * c for i, c in enumerate(h)) / n,
+      max(i for i, c in enumerate(h) if c)))
+PY
+}
+'
+
 die() {
     printf '[demo] 错误: %s\n' "$*" >&2
     exit 1
@@ -24,14 +47,16 @@ die() {
 
 usage() {
     cat <<'EOF'
-用法: tools/board/demo.sh <env|cap|gain|npu|stab|all>
+用法: tools/board/demo.sh <env|cap|gain|algo|latency|npu|stab|all>
 
-  env   位流 SHA256（/root 有 .bit 时）、PCIe LnkSta、modinfo、hwmon 温度、设备节点
-  cap   取一帧到 /tmp/demo_cap.pgm，打印尺寸/均值（只读帧缓冲）
-  gain  传感器增益扫描：写 0x280，各档取一帧比较均值/最大值
-  npu   FPGA JPEG -> RKNN YOLO11n 跑 3 帧，标注图拷到 /tmp/demo_npu.jpg
-  stab  压缩支路 20 s 稳定性采样
-  all   env + cap + npu
+  env      位流 SHA256（/root 有 .bit 时）、PCIe LnkSta、modinfo、hwmon 温度、设备节点
+  cap      取一帧到 /tmp/demo_cap.pgm，打印尺寸与均值（不 ARM、不改寄存器）
+  gain     传感器增益扫描：写 0x280 的 0x00/0x20/0x40/0x64，各取一帧比均值
+  algo     四路预处理扫描：0x240 = 0x0/0x2/0x4/0x6，各取一帧并算高频能量
+  latency  连续取 20 帧，打印 R10F 时间戳口径的端到端延迟
+  npu      FPGA JPEG -> RKNN YOLO11n 跑 3 帧，标注图拷到 /tmp/demo_npu.jpg
+  stab     压缩支路 20 s 稳定性采样
+  all      env + cap + npu
 
 板端 IP 可用 BOARD 覆盖，默认 192.168.1.101，例如：
   BOARD=192.168.1.102 tools/board/demo.sh env
@@ -186,6 +211,83 @@ REMOTE
     echo "  本机副本: /tmp/demo_cap.pgm"
 }
 
+cmd_gain() {
+    check_board
+    guard_algo gain
+    ssh_board sh -s <<REMOTE
+$REMOTE_PRELUDE
+[ -x /root/pci_bar ] && [ -x /root/link_ctl ] || { echo "  错误: 板端缺少 /root/pci_bar 或 /root/link_ctl" >&2; exit 3; }
+echo "== 传感器增益扫描（0x280，0.3 dB/LSB）=="
+for g in 0x00 0x20 0x40 0x64; do
+    \$PCI 0 0x280 "\$g" >/dev/null 2>&1 || { echo "  写 0x280=\$g 失败" >&2; exit 4; }
+    sleep 1.2
+    grab "gain\$g" "增益码 \$g"
+done
+\$PCI 0 0x280 0x30 >/dev/null 2>&1 || true
+echo "  已写回 0x30（白天室内 0x20–0x30，夜间 0x50–0x64）"
+REMOTE
+}
+
+cmd_algo() {
+    check_board
+    guard_algo algo
+    ssh_board sh -s <<REMOTE
+$REMOTE_PRELUDE
+[ -x /root/pci_bar ] && [ -x /root/link_ctl ] || { echo "  错误: 板端缺少 /root/pci_bar 或 /root/link_ctl" >&2; exit 3; }
+echo "== 四路预处理扫描（0x240）=="
+for v in 0x0 0x2 0x4 0x6; do
+    \$PCI 0 0x240 "\$v" >/dev/null 2>&1 || { echo "  写 0x240=\$v 失败" >&2; exit 4; }
+    sleep 0.3
+    grab "algo\$v" "0x240=\$v"
+done
+python3 - <<'PY'
+import numpy as np
+from PIL import Image, ImageFilter
+
+names = {'0x0': '灰度', '0x2': '3x3 高斯', '0x4': '直方图均衡', '0x6': 'Sobel 边缘'}
+print('  %-6s %-14s %8s %8s %8s' % ('0x240', '算法', '均值', '标准差', '高频能量'))
+for v, name in names.items():
+    try:
+        im = Image.open(f'/tmp/algo{v}.pgm').convert('L')
+    except OSError:
+        print('  %-6s %-14s 取帧失败' % (v, name))
+        continue
+    a = np.asarray(im, dtype=np.float64)
+    lap = np.asarray(im.filter(ImageFilter.Kernel(
+        (3, 3), (0, 1, 0, 1, -4, 1, 0, 1, 0), scale=1, offset=0)), dtype=np.float64)
+    print('  %-6s %-14s %8.1f %8.1f %8.2f'
+          % (v, name, a.mean(), a.std(), np.abs(lap).mean()))
+PY
+\$PCI 0 0x240 0x0 >/dev/null 2>&1 || true
+REMOTE
+}
+
+cmd_latency() {
+    check_board
+    guard_algo latency
+    ssh_board sh -s <<'REMOTE'
+set -eu
+echo "== 端到端延迟（R10F SOF 时间戳，取 20 帧）=="
+i=0
+: > /tmp/lat.txt
+while [ "$i" -lt 20 ]; do
+    /root/link_ctl ack >/dev/null 2>&1 || true
+    /root/link_ctl arm >/dev/null 2>&1 || true
+    /root/frame_grab -t 3000 -o /tmp/lat.pgm 2>&1 \
+        | sed -n 's/.*端到端延迟: \([0-9.]*\) ms.*/\1/p' >> /tmp/lat.txt
+    i=$((i + 1))
+done
+python3 - <<'PY'
+vals = sorted(float(x) for x in open('/tmp/lat.txt').read().split() if float(x) < 1000)
+if not vals:
+    raise SystemExit('  没有取到有效样本')
+n = len(vals)
+print('  n=%d  最小 %.1f ms  中位 %.1f ms  最大 %.1f ms' %
+      (n, vals[0], vals[n // 2], vals[-1]))
+PY
+REMOTE
+}
+
 cmd_npu() {
     check_board
     guard_algo npu
@@ -207,38 +309,6 @@ REMOTE
     echo "  本机副本: /tmp/demo_npu.jpg"
 }
 
-cmd_gain() {
-    check_board
-    guard_algo gain
-    ssh_board sh -s <<'REMOTE'
-set -eu
-[ -x /root/pci_bar ] && [ -x /root/link_ctl ] || { echo "  错误: 板端缺少 /root/pci_bar 或 /root/link_ctl" >&2; exit 3; }
-grab() {
-    /root/link_ctl ack >/dev/null 2>&1 || true
-    /root/link_ctl arm >/dev/null 2>&1 || true
-    sleep 0.9
-    /root/frame_grab -t 5000 -o /tmp/gain.pgm >/dev/null 2>&1 || { echo "  $1: 取帧失败"; return 0; }
-    python3 - "$1" <<'PY'
-import sys
-from PIL import Image
-im = Image.open('/tmp/gain.pgm').convert('L')
-h = im.histogram(); n = sum(h)
-mean = sum(i * c for i, c in enumerate(h)) / n
-mx = max(i for i, c in enumerate(h) if c)
-print('  增益码 %-6s 均值 %6.1f 最大 %3d' % (sys.argv[1], mean, mx))
-PY
-}
-for g in 0x00 0x20 0x40 0x64; do
-    /root/pci_bar 0 0x280 "$g" >/dev/null 2>&1 || { echo "  写 0x280=$g 失败" >&2; exit 4; }
-    sleep 1.2
-    grab "$g"
-done
-# 恢复到适合白天室内的档位
-/root/pci_bar 0 0x280 0x30 >/dev/null 2>&1 || true
-echo "  已写回 0x30（白天室内建议 0x20–0x30，夜间 0x50–0x64）"
-REMOTE
-}
-
 cmd_stab() {
     check_board
     guard_algo stab
@@ -255,12 +325,14 @@ cmd_all() {
 
 [ $# -eq 1 ] || { usage >&2; exit 2; }
 case "$1" in
-    env)  cmd_env ;;
-    cap)  cmd_cap ;;
-    gain) cmd_gain ;;
-    npu)  cmd_npu ;;
-    stab) cmd_stab ;;
-    all)  cmd_all ;;
+    env)     cmd_env ;;
+    cap)     cmd_cap ;;
+    gain)    cmd_gain ;;
+    algo)    cmd_algo ;;
+    latency) cmd_latency ;;
+    npu)     cmd_npu ;;
+    stab)    cmd_stab ;;
+    all)     cmd_all ;;
     -h|--help|help) usage ;;
-    *)    usage >&2; exit 2 ;;
+    *)       usage >&2; exit 2 ;;
 esac
