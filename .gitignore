@@ -5,3 +5,6 @@ td_*.logw
 log/
 __pycache__/
 *.pyc
+
+# Typst 编译器等本地工具，不入库
+.tooling/

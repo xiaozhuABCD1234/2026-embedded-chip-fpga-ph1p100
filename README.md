@@ -118,6 +118,15 @@ ssh root@<BOARD> '/root/display-pair --source device --scale 2 --port 8091'
 
 ## 文档
 
+正式报告用 Typst 排版，产物是 PDF（含封面、目录、图目录、表目录）：
+
+| 文件 | 说明 |
+|---|---|
+| [docs/report.pdf](docs/report.pdf) | **提交用技术报告**，14 页，A4 |
+| [docs/report.typ](docs/report.typ) | 报告源码；改完执行 `typst compile docs/report.typ docs/report.pdf` |
+
+仓库里另有便于在 GitHub 上直接阅读的 Markdown 版：
+
 - [ARCHITECTURE](docs/ARCHITECTURE.md)：拓扑、帧契约、寄存器、双路同步
 - [TEST_REPORT](docs/TEST_REPORT.md)：六项交付状态、实测数据、缺口
 - [REQUIREMENTS](docs/REQUIREMENTS.md)：赛题逐条对照、评分点与优先级

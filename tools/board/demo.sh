@@ -24,10 +24,11 @@ die() {
 
 usage() {
     cat <<'EOF'
-用法: tools/board/demo.sh <env|cap|npu|stab|all>
+用法: tools/board/demo.sh <env|cap|gain|npu|stab|all>
 
   env   位流 SHA256（/root 有 .bit 时）、PCIe LnkSta、modinfo、hwmon 温度、设备节点
   cap   取一帧到 /tmp/demo_cap.pgm，打印尺寸/均值（只读帧缓冲）
+  gain  传感器增益扫描：写 0x280，各档取一帧比较均值/最大值
   npu   FPGA JPEG -> RKNN YOLO11n 跑 3 帧，标注图拷到 /tmp/demo_npu.jpg
   stab  压缩支路 20 s 稳定性采样
   all   env + cap + npu
@@ -206,6 +207,38 @@ REMOTE
     echo "  本机副本: /tmp/demo_npu.jpg"
 }
 
+cmd_gain() {
+    check_board
+    guard_algo gain
+    ssh_board sh -s <<'REMOTE'
+set -eu
+[ -x /root/pci_bar ] && [ -x /root/link_ctl ] || { echo "  错误: 板端缺少 /root/pci_bar 或 /root/link_ctl" >&2; exit 3; }
+grab() {
+    /root/link_ctl ack >/dev/null 2>&1 || true
+    /root/link_ctl arm >/dev/null 2>&1 || true
+    sleep 0.9
+    /root/frame_grab -t 5000 -o /tmp/gain.pgm >/dev/null 2>&1 || { echo "  $1: 取帧失败"; return 0; }
+    python3 - "$1" <<'PY'
+import sys
+from PIL import Image
+im = Image.open('/tmp/gain.pgm').convert('L')
+h = im.histogram(); n = sum(h)
+mean = sum(i * c for i, c in enumerate(h)) / n
+mx = max(i for i, c in enumerate(h) if c)
+print('  增益码 %-6s 均值 %6.1f 最大 %3d' % (sys.argv[1], mean, mx))
+PY
+}
+for g in 0x00 0x20 0x40 0x64; do
+    /root/pci_bar 0 0x280 "$g" >/dev/null 2>&1 || { echo "  写 0x280=$g 失败" >&2; exit 4; }
+    sleep 1.2
+    grab "$g"
+done
+# 恢复到适合白天室内的档位
+/root/pci_bar 0 0x280 0x30 >/dev/null 2>&1 || true
+echo "  已写回 0x30（白天室内建议 0x20–0x30，夜间 0x50–0x64）"
+REMOTE
+}
+
 cmd_stab() {
     check_board
     guard_algo stab
@@ -224,6 +257,7 @@ cmd_all() {
 case "$1" in
     env)  cmd_env ;;
     cap)  cmd_cap ;;
+    gain) cmd_gain ;;
     npu)  cmd_npu ;;
     stab) cmd_stab ;;
     all)  cmd_all ;;
