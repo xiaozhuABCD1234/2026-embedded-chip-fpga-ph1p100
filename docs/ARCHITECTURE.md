@@ -92,7 +92,7 @@ DDR packed RAW10 帧 → cstream_reader（5→4 拆包）→ line2block → dct2
 | `0x1E4..0x20C` | SYNC 状态 | 见 §6 |
 | `0x234` | PAIR_STATUS | bit0/1=A/B held；错误码 `[9:2]/[17:10]` |
 | `0x238/0x23C` | TS_NOW | 64 位自由计数器（clk_ddr，实测 99.92 MHz） |
-| `0x240` | ALGO_CTRL | `[2:1]` 0=灰度、1=高斯、2=HE；bit4=压缩；bit6=推压缩块 |
+| `0x240` | ALGO_CTRL | `[2:1]` 0=灰度、1=高斯、2=HE、3=Sobel 边缘；bit4=压缩；bit6=推压缩块 |
 | `0x244/0x248/0x24C` | ALGO_ACC/REJ/OVF | ROI 适配器收下/拒绝/溢出帧数 |
 | `0x250` | 压缩流长度 | 最近完成帧的熵流字节数 |
 | `0x254/0x260` | 回读像素/启动次数 | 诊断 |
